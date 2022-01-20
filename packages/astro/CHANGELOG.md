@@ -1,5 +1,11 @@
 # astro
 
+## 0.22.17
+
+### Patch Changes
+
+- [#2432](https://github.com/withastro/astro/pull/2432) [`9e1bc175`](https://github.com/withastro/astro/commit/9e1bc1752f44db8f996c35f64cec259ce3fbc731) Thanks [@matthewp](https://github.com/matthewp)! - Fixes bugs with apostrophes in the title tag
+
 ## 0.22.16
 
 ### Patch Changes
@@ -1166,10 +1172,10 @@ For convenience, you may now also move your `astro.config.js` file to a top-leve
 
   ```js
   export default {
-    markdownOptions: {
-      remarkPlugins: ['remark-slug', ['remark-autolink-headings', { behavior: 'prepend' }]],
-      rehypePlugins: ['rehype-slug', ['rehype-autolink-headings', { behavior: 'prepend' }]],
-    },
+  	markdownOptions: {
+  		remarkPlugins: ['remark-slug', ['remark-autolink-headings', { behavior: 'prepend' }]],
+  		rehypePlugins: ['rehype-slug', ['rehype-autolink-headings', { behavior: 'prepend' }]],
+  	},
   };
   ```
 
@@ -1189,10 +1195,10 @@ For convenience, you may now also move your `astro.config.js` file to a top-leve
 
   ```js
   export default {
-    name: '@matthewp/my-renderer',
-    server: './server.js',
-    client: './client.js',
-    hydrationPolyfills: ['./my-polyfill.js'],
+  	name: '@matthewp/my-renderer',
+  	server: './server.js',
+  	client: './client.js',
+  	hydrationPolyfills: ['./my-polyfill.js'],
   };
   ```
 
