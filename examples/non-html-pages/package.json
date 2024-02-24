@@ -1,14 +1,16 @@
 {
   "name": "@example/non-html-pages",
+  "type": "module",
   "version": "0.0.1",
   "private": true,
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "astro": "astro"
   },
-  "devDependencies": {
-    "astro": "^1.0.0-beta.26"
+  "dependencies": {
+    "astro": "^4.4.4"
   }
 }

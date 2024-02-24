@@ -1,34 +1,52 @@
-import type { AstroComponentMetadata, SSRLoadedRenderer } from '../../@types/astro';
-import type { SSRElement, SSRResult } from '../../@types/astro';
-import { hydrationSpecifier, serializeListValue } from './util.js';
-import serializeJavaScript from 'serialize-javascript';
+import type {
+	AstroComponentMetadata,
+	SSRElement,
+	SSRLoadedRenderer,
+	SSRResult,
+} from '../../@types/astro.js';
+import { AstroError, AstroErrorData } from '../../core/errors/index.js';
+import { escapeHTML } from './escape.js';
+import { serializeProps } from './serialize.js';
 
-// Serializes props passed into a component so that they can be reused during hydration.
-// The value is any
-export function serializeProps(value: any) {
-	return serializeJavaScript(value);
+export interface HydrationMetadata {
+	directive: string;
+	value: string;
+	componentUrl: string;
+	componentExport: { value: string };
 }
 
-const HydrationDirectives = ['load', 'idle', 'media', 'visible', 'only'];
+type Props = Record<string | number | symbol, any>;
 
 interface ExtractedProps {
-	hydration: {
-		directive: string;
-		value: string;
-		componentUrl: string;
-		componentExport: { value: string };
-	} | null;
-	props: Record<string | number, any>;
+	isPage: boolean;
+	hydration: HydrationMetadata | null;
+	props: Props;
+	propsWithoutTransitionAttributes: Props;
 }
+
+const transitionDirectivesToCopyOnIsland = Object.freeze([
+	'data-astro-transition-scope',
+	'data-astro-transition-persist',
+]);
 
 // Used to extract the directives, aka `client:load` information about a component.
 // Finds these special props and removes them from what gets passed into the component.
-export function extractDirectives(inputProps: Record<string | number, any>): ExtractedProps {
+export function extractDirectives(
+	inputProps: Props,
+	clientDirectives: SSRResult['clientDirectives']
+): ExtractedProps {
 	let extracted: ExtractedProps = {
+		isPage: false,
 		hydration: null,
 		props: {},
+		propsWithoutTransitionAttributes: {},
 	};
 	for (const [key, value] of Object.entries(inputProps)) {
+		if (key.startsWith('server:')) {
+			if (key === 'server:root') {
+				extracted.isPage = true;
+			}
+		}
 		if (key.startsWith('client:')) {
 			if (!extracted.hydration) {
 				extracted.hydration = {
@@ -52,16 +70,20 @@ export function extractDirectives(inputProps: Record<string | number, any>): Ext
 				case 'client:component-hydration': {
 					break;
 				}
+				case 'client:display-name': {
+					break;
+				}
 				default: {
 					extracted.hydration.directive = key.split(':')[1];
 					extracted.hydration.value = value;
 
 					// throw an error if an invalid hydration directive was provided
-					if (HydrationDirectives.indexOf(extracted.hydration.directive) < 0) {
+					if (!clientDirectives.has(extracted.hydration.directive)) {
+						const hydrationMethods = Array.from(clientDirectives.keys())
+							.map((d) => `client:${d}`)
+							.join(', ');
 						throw new Error(
-							`Error: invalid hydration directive "${key}". Supported hydration methods: ${HydrationDirectives.map(
-								(d) => `"client:${d}"`
-							).join(', ')}`
+							`Error: invalid hydration directive "${key}". Supported hydration methods: ${hydrationMethods}`
 						);
 					}
 
@@ -70,20 +92,22 @@ export function extractDirectives(inputProps: Record<string | number, any>): Ext
 						extracted.hydration.directive === 'media' &&
 						typeof extracted.hydration.value !== 'string'
 					) {
-						throw new Error(
-							'Error: Media query must be provided for "client:media", similar to client:media="(max-width: 600px)"'
-						);
+						throw new AstroError(AstroErrorData.MissingMediaQueryDirective);
 					}
 
 					break;
 				}
 			}
-		} else if (key === 'class:list') {
-			// support "class" from an expression passed into a component (#782)
-			extracted.props[key.slice(0, -5)] = serializeListValue(value);
 		} else {
 			extracted.props[key] = value;
+			if (!transitionDirectivesToCopyOnIsland.includes(key)) {
+				extracted.propsWithoutTransitionAttributes[key] = value;
+			}
 		}
+	}
+	for (const sym of Object.getOwnPropertySymbols(inputProps)) {
+		extracted.props[sym] = inputProps[sym];
+		extracted.propsWithoutTransitionAttributes[sym] = inputProps[sym];
 	}
 
 	return extracted;
@@ -94,6 +118,7 @@ interface HydrateScriptOptions {
 	result: SSRResult;
 	astroId: string;
 	props: Record<string | number, any>;
+	attrs: Record<string, string> | undefined;
 }
 
 /** For hydrated components, generate a <script type="module"> to load the component */
@@ -101,41 +126,59 @@ export async function generateHydrateScript(
 	scriptOptions: HydrateScriptOptions,
 	metadata: Required<AstroComponentMetadata>
 ): Promise<SSRElement> {
-	const { renderer, result, astroId, props } = scriptOptions;
+	const { renderer, result, astroId, props, attrs } = scriptOptions;
 	const { hydrate, componentUrl, componentExport } = metadata;
 
-	if (!componentExport) {
-		throw new Error(
-			`Unable to resolve a componentExport for "${metadata.displayName}"! Please open an issue.`
-		);
+	if (!componentExport.value) {
+		throw new AstroError({
+			...AstroErrorData.NoMatchingImport,
+			message: AstroErrorData.NoMatchingImport.message(metadata.displayName),
+		});
 	}
 
-	let hydrationSource = ``;
-
-	hydrationSource += renderer.clientEntrypoint
-		? `const [{ ${
-				componentExport.value
-		  }: Component }, { default: hydrate }] = await Promise.all([import("${await result.resolve(
-				componentUrl
-		  )}"), import("${await result.resolve(renderer.clientEntrypoint)}")]);
-  return (el, children) => hydrate(el)(Component, ${serializeProps(props)}, children);
-`
-		: `await import("${await result.resolve(componentUrl)}");
-  return () => {};
-`;
-	// TODO: If we can figure out tree-shaking in the final SSR build, we could safely
-	// use BEFORE_HYDRATION_SCRIPT_ID instead of 'astro:scripts/before-hydration.js'.
-	const hydrationScript = {
-		props: { type: 'module', 'data-astro-component-hydration': true },
-		children: `import setup from '${await result.resolve(hydrationSpecifier(hydrate))}';
-${`import '${await result.resolve('astro:scripts/before-hydration.js')}';`}
-setup("${astroId}", {name:"${metadata.displayName}",${
-			metadata.hydrateArgs ? `value: ${JSON.stringify(metadata.hydrateArgs)}` : ''
-		}}, async () => {
-  ${hydrationSource}
-});
-`,
+	const island: SSRElement = {
+		children: '',
+		props: {
+			// This is for HMR, probably can avoid it in prod
+			uid: astroId,
+		},
 	};
 
-	return hydrationScript;
+	// Attach renderer-provided attributes
+	if (attrs) {
+		for (const [key, value] of Object.entries(attrs)) {
+			island.props[key] = escapeHTML(value);
+		}
+	}
+
+	// Add component url
+	island.props['component-url'] = await result.resolve(decodeURI(componentUrl));
+
+	// Add renderer url
+	if (renderer.clientEntrypoint) {
+		island.props['component-export'] = componentExport.value;
+		island.props['renderer-url'] = await result.resolve(decodeURI(renderer.clientEntrypoint));
+		island.props['props'] = escapeHTML(serializeProps(props, metadata));
+	}
+
+	island.props['ssr'] = '';
+	island.props['client'] = hydrate;
+	let beforeHydrationUrl = await result.resolve('astro:scripts/before-hydration.js');
+	if (beforeHydrationUrl.length) {
+		island.props['before-hydration-url'] = beforeHydrationUrl;
+	}
+	island.props['opts'] = escapeHTML(
+		JSON.stringify({
+			name: metadata.displayName,
+			value: metadata.hydrateArgs || '',
+		})
+	);
+
+	transitionDirectivesToCopyOnIsland.forEach((name) => {
+		if (props[name]) {
+			island.props[name] = props[name];
+		}
+	});
+
+	return island;
 }

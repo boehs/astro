@@ -1,7 +1,8 @@
-import { expect } from 'chai';
+import assert from 'node:assert/strict';
+import { before, describe, it } from 'node:test';
 import { load as cheerioLoad } from 'cheerio';
-import { loadFixture } from './test-utils.js';
 import testAdapter from './test-adapter.js';
+import { loadFixture } from './test-utils.js';
 
 describe('Markdown pages in SSR', () => {
 	/** @type {import('./test-utils').Fixture} */
@@ -10,9 +11,7 @@ describe('Markdown pages in SSR', () => {
 	before(async () => {
 		fixture = await loadFixture({
 			root: './fixtures/ssr-markdown/',
-			experimental: {
-				ssr: true,
-			},
+			output: 'server',
 			adapter: testAdapter(),
 		});
 		await fixture.build();
@@ -29,12 +28,6 @@ describe('Markdown pages in SSR', () => {
 	it('Renders markdown pages correctly', async () => {
 		const html = await fetchHTML('/post');
 		const $ = cheerioLoad(html);
-		expect($('#subheading').text()).to.equal('Subheading');
-	});
-
-	it('Renders the Markdown component correctly', async () => {
-		const html = await fetchHTML('/page');
-		const $ = cheerioLoad(html);
-		expect($('#something')).to.have.lengthOf(1);
+		assert.equal($('#subheading').text(), 'Subheading');
 	});
 });

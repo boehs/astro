@@ -1,159 +1,82 @@
-import type { AstroConfig } from '../../@types/astro';
-import type { LogOptions } from '../logger/core';
-import type { AddressInfo } from 'net';
-import type { AstroTelemetry } from '@astrojs/telemetry';
-
-import http from 'http';
-import sirv from 'sirv';
-import { performance } from 'perf_hooks';
-import { fileURLToPath } from 'url';
-import * as msg from '../messages.js';
-import { error, info } from '../logger/core.js';
-import { subpathNotUsedTemplate, notFoundTemplate } from '../../template/4xx.js';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import type { AstroInlineConfig, PreviewModule, PreviewServer } from '../../@types/astro.js';
+import { AstroIntegrationLogger } from '../../core/logger/core.js';
+import { telemetry } from '../../events/index.js';
+import { eventCliSession } from '../../events/session.js';
+import { runHookConfigDone, runHookConfigSetup } from '../../integrations/index.js';
+import { resolveConfig } from '../config/config.js';
+import { createNodeLogger } from '../config/logging.js';
+import { createSettings } from '../config/settings.js';
+import createStaticPreviewServer from './static-preview-server.js';
 import { getResolvedHostForHttpServer } from './util.js';
+import { ensureProcessNodeEnv } from '../util.js';
+import { apply as applyPolyfills } from '../polyfill.js';
 
-interface PreviewOptions {
-	logging: LogOptions;
-	telemetry: AstroTelemetry;
-}
+/**
+ * Starts a local server to serve your static dist/ directory. This command is useful for previewing
+ * your build locally, before deploying it. It is not designed to be run in production.
+ *
+ * @experimental The JavaScript API is experimental
+ */
+export default async function preview(inlineConfig: AstroInlineConfig): Promise<PreviewServer> {
+	applyPolyfills();
+	ensureProcessNodeEnv('production');
+	const logger = createNodeLogger(inlineConfig);
+	const { userConfig, astroConfig } = await resolveConfig(inlineConfig ?? {}, 'preview');
+	telemetry.record(eventCliSession('preview', userConfig));
 
-export interface PreviewServer {
-	host?: string;
-	port: number;
-	server: http.Server;
-	closed(): Promise<void>;
-	stop(): Promise<void>;
-}
+	const _settings = await createSettings(astroConfig, fileURLToPath(astroConfig.root));
 
-const HAS_FILE_EXTENSION_REGEXP = /^.*\.[^\\]+$/;
-
-/** The primary dev action */
-export default async function preview(
-	config: AstroConfig,
-	{ logging }: PreviewOptions
-): Promise<PreviewServer> {
-	const startServerTime = performance.now();
-	const defaultOrigin = 'http://localhost';
-	const trailingSlash = config.trailingSlash;
-	/** Base request URL. */
-	let baseURL = new URL(config.base, new URL(config.site || '/', defaultOrigin));
-	const staticFileServer = sirv(fileURLToPath(config.outDir), {
-		dev: true,
-		etag: true,
-		maxAge: 0,
+	const settings = await runHookConfigSetup({
+		settings: _settings,
+		command: 'preview',
+		logger: logger,
 	});
-	// Create the preview server, send static files out of the `dist/` directory.
-	const server = http.createServer((req, res) => {
-		const requestURL = new URL(req.url as string, defaultOrigin);
+	await runHookConfigDone({ settings: settings, logger: logger });
 
-		// respond 404 to requests outside the base request directory
-		if (!requestURL.pathname.startsWith(baseURL.pathname)) {
-			res.statusCode = 404;
-			res.end(subpathNotUsedTemplate(baseURL.pathname, requestURL.pathname));
-			return;
+	if (settings.config.output === 'static') {
+		if (!fs.existsSync(settings.config.outDir)) {
+			const outDirPath = fileURLToPath(settings.config.outDir);
+			throw new Error(
+				`[preview] The output directory ${outDirPath} does not exist. Did you run \`astro build\`?`
+			);
 		}
+		const server = await createStaticPreviewServer(settings, logger);
+		return server;
+	}
+	if (!settings.adapter) {
+		throw new Error(`[preview] No adapter found.`);
+	}
+	if (!settings.adapter.previewEntrypoint) {
+		throw new Error(
+			`[preview] The ${settings.adapter.name} adapter does not support the preview command.`
+		);
+	}
+	// We need to use require.resolve() here so that advanced package managers like pnpm
+	// don't treat this as a dependency of Astro itself. This correctly resolves the
+	// preview entrypoint of the integration package, relative to the user's project root.
+	const require = createRequire(settings.config.root);
+	const previewEntrypointUrl = pathToFileURL(
+		require.resolve(settings.adapter.previewEntrypoint)
+	).href;
 
-		/** Relative request path. */
-		const pathname = requestURL.pathname.slice(baseURL.pathname.length - 1);
-
-		const isRoot = pathname === '/';
-		const hasTrailingSlash = isRoot || pathname.endsWith('/');
-
-		function sendError(message: string) {
-			res.statusCode = 404;
-			res.end(notFoundTemplate(pathname, message));
-		}
-
-		switch (true) {
-			case hasTrailingSlash && trailingSlash == 'never' && !isRoot:
-				sendError('Not Found (trailingSlash is set to "never")');
-				return;
-			case !hasTrailingSlash &&
-				trailingSlash == 'always' &&
-				!isRoot &&
-				!HAS_FILE_EXTENSION_REGEXP.test(pathname):
-				sendError('Not Found (trailingSlash is set to "always")');
-				return;
-			default: {
-				// HACK: rewrite req.url so that sirv finds the file
-				req.url = '/' + req.url?.replace(baseURL.pathname, '');
-				staticFileServer(req, res, () => sendError('Not Found'));
-				return;
-			}
-		}
-	});
-
-	let { port } = config.server;
-	const host = getResolvedHostForHttpServer(config.server.host);
-
-	let httpServer: http.Server;
-
-	/** Expose dev server to `port` */
-	function startServer(timerStart: number): Promise<void> {
-		let showedPortTakenMsg = false;
-		let showedListenMsg = false;
-		return new Promise<void>((resolve, reject) => {
-			const listen = () => {
-				httpServer = server.listen(port, host, async () => {
-					if (!showedListenMsg) {
-						const devServerAddressInfo = server.address() as AddressInfo;
-						info(
-							logging,
-							null,
-							msg.devStart({
-								startupTime: performance.now() - timerStart,
-								config,
-								devServerAddressInfo,
-								https: false,
-								site: baseURL,
-							})
-						);
-					}
-					showedListenMsg = true;
-					resolve();
-				});
-				httpServer?.on('error', onError);
-			};
-
-			const onError = (err: NodeJS.ErrnoException) => {
-				if (err.code && err.code === 'EADDRINUSE') {
-					if (!showedPortTakenMsg) {
-						info(logging, 'astro', msg.portInUse({ port }));
-						showedPortTakenMsg = true; // only print this once
-					}
-					port++;
-					return listen(); // retry
-				} else {
-					error(logging, 'astro', err.stack);
-					httpServer?.removeListener('error', onError);
-					reject(err); // reject
-				}
-			};
-
-			listen();
-		});
+	const previewModule = (await import(previewEntrypointUrl)) as Partial<PreviewModule>;
+	if (typeof previewModule.default !== 'function') {
+		throw new Error(`[preview] ${settings.adapter.name} cannot preview your app.`);
 	}
 
-	// Start listening on `hostname:port`.
-	await startServer(startServerTime);
+	const server = await previewModule.default({
+		outDir: settings.config.outDir,
+		client: settings.config.build.client,
+		serverEntrypoint: new URL(settings.config.build.serverEntry, settings.config.build.server),
+		host: getResolvedHostForHttpServer(settings.config.server.host),
+		port: settings.config.server.port,
+		base: settings.config.base,
+		logger: new AstroIntegrationLogger(logger.options, settings.adapter.name),
+		headers: settings.config.server.headers,
+	});
 
-	// Resolves once the server is closed
-	function closed() {
-		return new Promise<void>((resolve, reject) => {
-			httpServer!.addListener('close', resolve);
-			httpServer!.addListener('error', reject);
-		});
-	}
-
-	return {
-		host,
-		port,
-		closed,
-		server: httpServer!,
-		stop: async () => {
-			await new Promise((resolve, reject) => {
-				httpServer.close((err) => (err ? reject(err) : resolve(undefined)));
-			});
-		},
-	};
+	return server;
 }

@@ -1,8 +1,9 @@
-**/*.js
-**/*.ts
-!packages/astro/**/*.js
-!packages/astro/**/*.ts
-packages/astro/test/**/*.js
+**/*.d.ts
+packages/**/*.min.js
+packages/**/dist/**/*
+packages/**/fixtures/**/*
 packages/astro/vendor/vite/**/*
+examples/**/*
+scripts/**/*
 .github
 .changeset

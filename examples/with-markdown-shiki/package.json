@@ -1,15 +1,16 @@
 {
   "name": "@example/with-markdown-shiki",
+  "type": "module",
   "version": "0.0.1",
   "private": true,
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
-    "preview": "astro preview"
+    "preview": "astro preview",
+    "astro": "astro"
   },
-  "devDependencies": {
-    "@astrojs/markdown-remark": "^0.9.4",
-    "astro": "^1.0.0-beta.26"
+  "dependencies": {
+    "astro": "^4.4.4"
   }
 }

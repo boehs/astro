@@ -1,154 +1,137 @@
-import type { AstroConfig } from '../@types/astro';
-import type { TransformResult } from '@astrojs/compiler';
-import type { SourceMapInput } from 'rollup';
-import type { TransformHook } from './styles';
+import { transformWithEsbuild, type ESBuildTransformResult } from 'vite';
+import type { AstroConfig } from '../@types/astro.js';
+import { compile, type CompileProps, type CompileResult } from '../core/compile/index.js';
+import type { Logger } from '../core/logger/core.js';
+import { getFileInfo } from '../vite-plugin-utils/index.js';
+import type { CompileMetadata } from './types.js';
+import { frontmatterRE } from './utils.js';
 
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-import { transform } from '@astrojs/compiler';
-import { transformWithVite } from './styles.js';
-import { viteID } from '../core/util.js';
-import { prependForwardSlash } from '../core/path.js';
-
-type CompilationCache = Map<string, CompileResult>;
-type CompileResult = TransformResult & { rawCSSDeps: Set<string> };
-
-/**
- * Note: this is currently needed because Astro is directly using a Vite internal CSS transform. This gives us
- * some nice features out of the box, but at the expense of also running Vite's CSS postprocessing build step,
- * which does some things that we don't like, like resolving/handling `@import` too early. This function pulls
- * out the `@import` tags to be added back later, and then finally handled correctly by Vite.
- *
- * In the future, we should remove this workaround and most likely implement our own Astro style handling without
- * having to hook into Vite's internals.
- */
-function createImportPlaceholder(spec: string) {
-	// Note: We keep this small so that we can attempt to exactly match the # of characters in the original @import.
-	// This keeps sourcemaps accurate (to the best of our ability) at the intermediate step where this appears.
-	// ->  `@import '${spec}';`;
-	return `/*IMPORT:${spec}*/`;
-}
-function safelyReplaceImportPlaceholder(code: string) {
-	return code.replace(/\/\*IMPORT\:(.*?)\*\//g, `@import '$1';`);
+interface CompileAstroOption {
+	compileProps: CompileProps;
+	astroFileToCompileMetadata: Map<string, CompileMetadata>;
+	logger: Logger;
 }
 
-const configCache = new WeakMap<AstroConfig, CompilationCache>();
+export interface CompileAstroResult extends Omit<CompileResult, 'map'> {
+	map: ESBuildTransformResult['map'];
+}
 
-async function compile(
-	config: AstroConfig,
-	filename: string,
-	source: string,
-	viteTransform: TransformHook,
-	opts: { ssr: boolean }
-): Promise<CompileResult> {
-	const filenameURL = new URL(`file://${filename}`);
-	const normalizedID = fileURLToPath(filenameURL);
-	const pathname = filenameURL.pathname.slice(config.root.pathname.length - 1);
+interface EnhanceCompilerErrorOptions {
+	err: Error;
+	id: string;
+	source: string;
+	config: AstroConfig;
+	logger: Logger;
+}
 
-	let rawCSSDeps = new Set<string>();
-	let cssTransformError: Error | undefined;
+export async function compileAstro({
+	compileProps,
+	astroFileToCompileMetadata,
+	logger,
+}: CompileAstroOption): Promise<CompileAstroResult> {
+	let transformResult: CompileResult;
+	let esbuildResult: ESBuildTransformResult;
 
-	// Transform from `.astro` to valid `.ts`
-	// use `sourcemap: "both"` so that sourcemap is included in the code
-	// result passed to esbuild, but also available in the catch handler.
-	const transformResult = await transform(source, {
-		pathname,
-		projectRoot: config.root.toString(),
-		site: config.site ? new URL(config.base, config.site).toString() : undefined,
-		sourcefile: filename,
-		sourcemap: 'both',
-		internalURL: `/@fs${prependForwardSlash(
-			viteID(new URL('../runtime/server/index.js', import.meta.url))
-		)}`,
-		// TODO: baseline flag
-		experimentalStaticExtraction: true,
-		preprocessStyle: async (value: string, attrs: Record<string, string>) => {
-			const lang = `.${attrs?.lang || 'css'}`.toLowerCase();
+	try {
+		transformResult = await compile(compileProps);
+		// Compile all TypeScript to JavaScript.
+		// Also, catches invalid JS/TS in the compiled output before returning.
+		esbuildResult = await transformWithEsbuild(transformResult.code, compileProps.filename, {
+			loader: 'ts',
+			target: 'esnext',
+			sourcemap: 'external',
+			tsconfigRaw: {
+				compilerOptions: {
+					// Ensure client:only imports are treeshaken
+					verbatimModuleSyntax: false,
+					importsNotUsedAsValues: 'remove',
+				},
+			},
+		});
+	} catch (err: any) {
+		await enhanceCompileError({
+			err,
+			id: compileProps.filename,
+			source: compileProps.source,
+			config: compileProps.astroConfig,
+			logger: logger,
+		});
+		throw err;
+	}
 
-			try {
-				// In the static build, grab any @import as CSS dependencies for HMR.
-				value.replace(
-					/(?:@import)\s(?:url\()?\s?["\'](.*?)["\']\s?\)?(?:[^;]*);?/gi,
-					(match, spec) => {
-						rawCSSDeps.add(spec);
-						// If the language is CSS: prevent `@import` inlining to prevent scoping of imports.
-						// Otherwise: Sass, etc. need to see imports for variables, so leave in for their compiler to handle.
-						if (lang === '.css') {
-							return createImportPlaceholder(spec);
-						} else {
-							return match;
-						}
-					}
+	const { fileId: file, fileUrl: url } = getFileInfo(
+		compileProps.filename,
+		compileProps.astroConfig
+	);
+
+	let SUFFIX = '';
+	SUFFIX += `\nconst $$file = ${JSON.stringify(file)};\nconst $$url = ${JSON.stringify(
+		url
+	)};export { $$file as file, $$url as url };\n`;
+
+	// Add HMR handling in dev mode.
+	if (!compileProps.viteConfig.isProduction) {
+		let i = 0;
+		while (i < transformResult.scripts.length) {
+			SUFFIX += `import "${compileProps.filename}?astro&type=script&index=${i}&lang.ts";`;
+			i++;
+		}
+	}
+
+	// Attach compile metadata to map for use by virtual modules
+	astroFileToCompileMetadata.set(compileProps.filename, {
+		originalCode: compileProps.source,
+		css: transformResult.css,
+		scripts: transformResult.scripts,
+	});
+
+	return {
+		...transformResult,
+		code: esbuildResult.code + SUFFIX,
+		map: esbuildResult.map,
+	};
+}
+
+async function enhanceCompileError({
+	err,
+	id,
+	source,
+}: EnhanceCompilerErrorOptions): Promise<void> {
+	const lineText = (err as any).loc?.lineText;
+	// Verify frontmatter: a common reason that this plugin fails is that
+	// the user provided invalid JS/TS in the component frontmatter.
+	// If the frontmatter is invalid, the `err` object may be a compiler
+	// panic or some other vague/confusing compiled error message.
+	//
+	// Before throwing, it is better to verify the frontmatter here, and
+	// let esbuild throw a more specific exception if the code is invalid.
+	// If frontmatter is valid or cannot be parsed, then continue.
+	const scannedFrontmatter = frontmatterRE.exec(source);
+	if (scannedFrontmatter) {
+		// Top-level return is not supported, so replace `return` with throw
+		const frontmatter = scannedFrontmatter[1].replace(/\breturn\b/g, 'throw');
+
+		// If frontmatter does not actually include the offending line, skip
+		if (lineText && !frontmatter.includes(lineText)) throw err;
+
+		try {
+			await transformWithEsbuild(frontmatter, id, {
+				loader: 'ts',
+				target: 'esnext',
+				sourcemap: false,
+			});
+		} catch (frontmatterErr: any) {
+			// Improve the error by replacing the phrase "unexpected end of file"
+			// with "unexpected end of frontmatter" in the esbuild error message.
+			if (frontmatterErr?.message) {
+				frontmatterErr.message = frontmatterErr.message.replace(
+					'end of file',
+					'end of frontmatter'
 				);
-
-				const result = await transformWithVite({
-					value,
-					lang,
-					id: normalizedID,
-					transformHook: viteTransform,
-					ssr: opts.ssr,
-				});
-
-				let map: SourceMapInput | undefined;
-				if (!result) return null as any; // TODO: add type in compiler to fix "any"
-				if (result.map) {
-					if (typeof result.map === 'string') {
-						map = result.map;
-					} else if (result.map.mappings) {
-						map = result.map.toString();
-					}
-				}
-				const code = safelyReplaceImportPlaceholder(result.code);
-				return { code, map };
-			} catch (err) {
-				// save error to throw in plugin context
-				cssTransformError = err as any;
-				return null;
 			}
-		},
-	});
-
-	// throw CSS transform errors here if encountered
-	if (cssTransformError) throw cssTransformError;
-
-	const compileResult: CompileResult = Object.create(transformResult, {
-		rawCSSDeps: {
-			value: rawCSSDeps,
-		},
-	});
-
-	return compileResult;
-}
-
-export function isCached(config: AstroConfig, filename: string) {
-	return configCache.has(config) && configCache.get(config)!.has(filename);
-}
-
-export function invalidateCompilation(config: AstroConfig, filename: string) {
-	if (configCache.has(config)) {
-		const cache = configCache.get(config)!;
-		cache.delete(filename);
+			throw frontmatterErr;
+		}
 	}
-}
 
-export async function cachedCompilation(
-	config: AstroConfig,
-	filename: string,
-	source: string,
-	viteTransform: TransformHook,
-	opts: { ssr: boolean }
-): Promise<CompileResult> {
-	let cache: CompilationCache;
-	if (!configCache.has(config)) {
-		cache = new Map();
-		configCache.set(config, cache);
-	} else {
-		cache = configCache.get(config)!;
-	}
-	if (cache.has(filename)) {
-		return cache.get(filename)!;
-	}
-	const compileResult = await compile(config, filename, source, viteTransform, opts);
-	cache.set(filename, compileResult);
-	return compileResult;
+	throw err;
 }

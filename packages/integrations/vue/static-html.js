@@ -9,10 +9,16 @@ import { h, defineComponent } from 'vue';
 const StaticHtml = defineComponent({
 	props: {
 		value: String,
+		name: String,
+		hydrate: {
+			type: Boolean,
+			default: true,
+		},
 	},
-	setup({ value }) {
+	setup({ name, value, hydrate }) {
 		if (!value) return () => null;
-		return () => h('astro-fragment', { innerHTML: value });
+		let tagName = hydrate ? 'astro-slot' : 'astro-static-slot';
+		return () => h(tagName, { name, innerHTML: value });
 	},
 });
 

@@ -3,8 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "dependencies": {
-    "@astrojs/react": "workspace:*",
     "@astrojs/preact": "workspace:*",
-    "astro": "workspace:*"
+    "@astrojs/react": "workspace:*",
+    "astro": "workspace:*",
+    "preact": "^10.19.2",
+    "react": "^18.1.0",
+    "react-dom": "^18.1.0"
   }
 }

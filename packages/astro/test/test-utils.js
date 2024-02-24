@@ -1,42 +1,82 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
-import { polyfill } from '@astrojs/webapi';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-import { resolveConfig, loadConfig } from '../dist/core/config.js';
-import dev from '../dist/core/dev/index.js';
-import build from '../dist/core/build/index.js';
-import preview from '../dist/core/preview/index.js';
-import { nodeLogDestination } from '../dist/core/logger/node.js';
-import os from 'os';
+import fastGlob from 'fast-glob';
 import stripAnsi from 'strip-ansi';
+import { check } from '../dist/cli/check/index.js';
+import build from '../dist/core/build/index.js';
+import { RESOLVED_SPLIT_MODULE_ID } from '../dist/core/build/plugins/plugin-ssr.js';
+import { getVirtualModulePageNameFromPath } from '../dist/core/build/plugins/util.js';
+import { makeSplitEntryPointFileName } from '../dist/core/build/static-build.js';
+import { mergeConfig, resolveConfig } from '../dist/core/config/index.js';
+import { dev, preview } from '../dist/core/index.js';
+import { nodeLogDestination } from '../dist/core/logger/node.js';
+import sync from '../dist/core/sync/index.js';
 
-// polyfill WebAPIs to globalThis for Node v12, Node v14, and Node v16
-polyfill(globalThis, {
-	exclude: 'window document',
-});
+// Disable telemetry when running tests
+process.env.ASTRO_TELEMETRY_DISABLED = true;
 
 /**
- * @typedef {import('node-fetch').Response} Response
- * @typedef {import('../src/core/dev/index').DevServer} DevServer
- * @typedef {import('../src/@types/astro').AstroConfig} AstroConfig
+ * @typedef {import('../src/core/dev/dev').DevServer} DevServer
+ * @typedef {import('../src/@types/astro').AstroInlineConfig & { root?: string | URL }} AstroInlineConfig
  * @typedef {import('../src/core/preview/index').PreviewServer} PreviewServer
  * @typedef {import('../src/core/app/index').App} App
+ * @typedef {import('../src/cli/check/index').AstroChecker} AstroChecker
+ * @typedef {import('../src/cli/check/index').CheckPayload} CheckPayload
  *
  *
  * @typedef {Object} Fixture
  * @property {typeof build} build
- * @property {(url: string, opts: any) => Promise<Response>} fetch
+ * @property {(url: string) => string} resolveUrl
+ * @property {(path: string) => Promise<boolean>} pathExists
+ * @property {(url: string, opts: Parameters<typeof fetch>[1]) => Promise<Response>} fetch
  * @property {(path: string) => Promise<string>} readFile
+ * @property {(path: string, updater: (content: string) => string) => Promise<void>} writeFile
  * @property {(path: string) => Promise<string[]>} readdir
- * @property {() => Promise<DevServer>} startDevServer
- * @property {() => Promise<PreviewServer>} preview
+ * @property {(pattern: string) => Promise<string[]>} glob
+ * @property {typeof dev} startDevServer
+ * @property {typeof preview} preview
  * @property {() => Promise<void>} clean
  * @property {() => Promise<App>} loadTestAdapterApp
+ * @property {() => Promise<void>} onNextChange
+ * @property {typeof check} check
+ * @property {typeof sync} sync
+ *
+ * This function returns an instance of the Check
+ *
+ *
+ * When used in a test suite:
+ * ```js
+ * let fixture = await loadFixture({
+ *   root: './fixtures/astro-check-watch/',
+ * });
+ * ```
+ * `opts` will override the options passed to the `AstroChecker`
+ *
+ * ```js
+ * let { check, stop, watch } = fixture.check({
+ *   flags: { watch: true },
+ * });
+ * ```
  */
+
+/** @type {import('../src/core/logger/core').LogOptions} */
+export const defaultLogging = {
+	dest: nodeLogDestination,
+	level: 'error',
+};
+
+/** @type {import('../src/core/logger/core').LogOptions} */
+export const silentLogging = {
+	dest: nodeLogDestination,
+	level: 'silent',
+};
 
 /**
  * Load Astro fixture
- * @param {AstroConfig} inlineConfig Astro config partial (note: must specify `root`)
+ * @param {AstroInlineConfig} inlineConfig Astro config partial (note: must specify `root`)
  * @returns {Promise<Fixture>} The fixture. Has the following properties:
  *   .config     - Returns the final config. Will be automatically passed to the methods below:
  *
@@ -46,7 +86,7 @@ polyfill(globalThis, {
  *
  *   Dev
  *   .startDevServer() - Async. Starts a dev server at an available port. Be sure to call devServer.stop() before test exit.
- *   .fetch(url)       - Async. Returns a URL from the prevew server (must have called .preview() before)
+ *   .fetch(url)       - Async. Returns a URL from the preview server (must have called .preview() before)
  *
  *   Preview
  *   .preview()        - Async. Starts a preview server. Note this can’t be running in same fixture as .dev() as they share ports. Also, you must call `server.close()` before test exit
@@ -55,101 +95,181 @@ polyfill(globalThis, {
  *   .clean()          - Async. Removes the project’s dist folder.
  */
 export async function loadFixture(inlineConfig) {
-	if (!inlineConfig || !inlineConfig.root)
-		throw new Error("Must provide { root: './fixtures/...' }");
+	if (!inlineConfig?.root) throw new Error("Must provide { root: './fixtures/...' }");
 
-	// load config
-	let cwd = inlineConfig.root;
-	delete inlineConfig.root;
-	if (typeof cwd === 'string') {
-		try {
-			cwd = new URL(cwd.replace(/\/?$/, '/'));
-		} catch (err1) {
-			cwd = new URL(cwd.replace(/\/?$/, '/'), import.meta.url);
-		}
+	// Silent by default during tests to not pollute the console output
+	inlineConfig.logLevel = 'silent';
+	inlineConfig.vite ??= {};
+	inlineConfig.vite.logLevel = 'silent';
+
+	let root = inlineConfig.root;
+	// Handle URL, should already be absolute so just convert to path
+	if (typeof root !== 'string') {
+		root = fileURLToPath(root);
 	}
+	// Handle "file:///C:/Users/fred", convert to "C:/Users/fred"
+	else if (root.startsWith('file://')) {
+		root = fileURLToPath(new URL(root));
+	}
+	// Handle "./fixtures/...", convert to absolute path
+	else if (!path.isAbsolute(root)) {
+		root = fileURLToPath(new URL(root, import.meta.url));
+	}
+	inlineConfig = { ...inlineConfig, root };
 	// Load the config.
-	let config = await loadConfig({ cwd: fileURLToPath(cwd) });
-	config = merge(config, { ...inlineConfig, root: cwd });
+	const { astroConfig: config } = await resolveConfig(inlineConfig, 'dev');
 
-	// Note: the inline config doesn't run through config validation where these normalizations usually occur
-	if (typeof inlineConfig.site === 'string') {
-		config.site = new URL(inlineConfig.site);
-	}
-	if (inlineConfig.base && !inlineConfig.base.endsWith('/')) {
-		config.base = inlineConfig.base + '/';
-	}
+	const resolveUrl = (url) =>
+		`http://${config.server.host || 'localhost'}:${config.server.port}${url.replace(/^\/?/, '/')}`;
 
-	/** @type {import('../src/core/logger/core').LogOptions} */
-	const logging = {
-		dest: nodeLogDestination,
-		level: 'error',
+	// A map of files that have been edited.
+	let fileEdits = new Map();
+
+	const resetAllFiles = () => {
+		for (const [, reset] of fileEdits) {
+			reset();
+		}
+		fileEdits.clear();
 	};
 
-	/** @type {import('@astrojs/telemetry').AstroTelemetry} */
-	const telemetry = {
-		record() {
-			return Promise.resolve();
-		},
-	};
+	const onNextChange = () =>
+		devServer
+			? new Promise((resolve) => devServer.watcher.once('change', resolve))
+			: Promise.reject(new Error('No dev server running'));
+
+	// After each test, reset each of the edits to their original contents.
+	if (typeof afterEach === 'function') {
+		afterEach(resetAllFiles);
+	}
+	// Also do it on process exit, just in case.
+	process.on('exit', resetAllFiles);
+
+	let fixtureId = new Date().valueOf();
+	let devServer;
 
 	return {
-		build: (opts = {}) => build(config, { mode: 'development', logging, telemetry, ...opts }),
-		startDevServer: async (opts = {}) => {
-			const devResult = await dev(config, { logging, telemetry, ...opts });
-			config.server.port = devResult.address.port; // update port
-			return devResult;
+		build: async (extraInlineConfig = {}) => {
+			process.env.NODE_ENV = 'production';
+			return build(mergeConfig(inlineConfig, extraInlineConfig), { teardownCompiler: false });
+		},
+		sync: async (extraInlineConfig = {}, opts) => {
+			return sync(mergeConfig(inlineConfig, extraInlineConfig), opts);
+		},
+		check: async (opts) => {
+			return await check(opts);
+		},
+		startDevServer: async (extraInlineConfig = {}) => {
+			process.env.NODE_ENV = 'development';
+			devServer = await dev(mergeConfig(inlineConfig, extraInlineConfig));
+			config.server.host = parseAddressToHost(devServer.address.address); // update host
+			config.server.port = devServer.address.port; // update port
+			return devServer;
 		},
 		config,
-		fetch: (url, init) =>
-			fetch(`http://${'127.0.0.1'}:${config.server.port}${url.replace(/^\/?/, '/')}`, init),
-		preview: async (opts = {}) => {
-			const previewServer = await preview(config, { logging, telemetry, ...opts });
+		resolveUrl,
+		fetch: async (url, init) => {
+			const resolvedUrl = resolveUrl(url);
+			try {
+				return await fetch(resolvedUrl, init);
+			} catch (err) {
+				// node fetch throws a vague error when it fails, so we log the url here to easily debug it
+				if (err.message?.includes('fetch failed')) {
+					console.error(`[astro test] failed to fetch ${resolvedUrl}`);
+					console.error(err);
+				}
+				throw err;
+			}
+		},
+		preview: async (extraInlineConfig = {}) => {
+			process.env.NODE_ENV = 'production';
+			const previewServer = await preview(mergeConfig(inlineConfig, extraInlineConfig));
+			config.server.host = parseAddressToHost(previewServer.host); // update host
+			config.server.port = previewServer.port; // update port
 			return previewServer;
 		},
-		readFile: (filePath) =>
-			fs.promises.readFile(new URL(filePath.replace(/^\//, ''), config.outDir), 'utf8'),
+		pathExists: (p) => fs.existsSync(new URL(p.replace(/^\//, ''), config.outDir)),
+		readFile: (filePath, encoding) =>
+			fs.promises.readFile(
+				new URL(filePath.replace(/^\//, ''), config.outDir),
+				encoding === undefined ? 'utf8' : encoding
+			),
 		readdir: (fp) => fs.promises.readdir(new URL(fp.replace(/^\//, ''), config.outDir)),
-		clean: () => fs.promises.rm(config.outDir, { maxRetries: 10, recursive: true, force: true }),
-		loadTestAdapterApp: async () => {
-			const url = new URL('./server/entry.mjs', config.outDir);
-			const { createApp } = await import(url);
-			return createApp();
+		glob: (p) =>
+			fastGlob(p, {
+				cwd: fileURLToPath(config.outDir),
+			}),
+		clean: async () => {
+			await fs.promises.rm(config.outDir, {
+				maxRetries: 10,
+				recursive: true,
+				force: true,
+			});
+			const contentCache = new URL('./node_modules/.astro/content', config.root);
+			if (fs.existsSync(contentCache)) {
+				await fs.promises.rm(contentCache, {
+					maxRetries: 10,
+					recursive: true,
+					force: true,
+				});
+			}
 		},
+		loadTestAdapterApp: async (streaming) => {
+			const url = new URL(`./server/entry.mjs?id=${fixtureId}`, config.outDir);
+			const { createApp, manifest } = await import(url);
+			const app = createApp(streaming);
+			app.manifest = manifest;
+			return app;
+		},
+		loadEntryPoint: async (pagePath, routes, streaming) => {
+			const virtualModule = getVirtualModulePageNameFromPath(RESOLVED_SPLIT_MODULE_ID, pagePath);
+			const filePath = makeSplitEntryPointFileName(virtualModule, routes);
+			const url = new URL(`./server/${filePath}?id=${fixtureId}`, config.outDir);
+			const { createApp, manifest } = await import(url);
+			const app = createApp(streaming);
+			app.manifest = manifest;
+			return app;
+		},
+		editFile: async (filePath, newContentsOrCallback) => {
+			const fileUrl = new URL(filePath.replace(/^\//, ''), config.root);
+			const contents = await fs.promises.readFile(fileUrl, 'utf-8');
+			const reset = () => {
+				fs.writeFileSync(fileUrl, contents);
+			};
+			// Only save this reset if not already in the map, in case multiple edits happen
+			// to the same file.
+			if (!fileEdits.has(fileUrl.toString())) {
+				fileEdits.set(fileUrl.toString(), reset);
+			}
+			const newContents =
+				typeof newContentsOrCallback === 'function'
+					? newContentsOrCallback(contents)
+					: newContentsOrCallback;
+			const nextChange = onNextChange();
+			await fs.promises.writeFile(fileUrl, newContents);
+			await nextChange;
+			return reset;
+		},
+		resetAllFiles,
 	};
 }
 
 /**
- * Basic object merge utility. Returns new copy of merged Object.
- * @param {Object} a
- * @param {Object} b
- * @returns {Object}
+ * @param {string} [address]
  */
-function merge(a, b) {
-	const allKeys = new Set([...Object.keys(a), ...Object.keys(b)]);
-	const c = {};
-	for (const k of allKeys) {
-		const needsObjectMerge =
-			typeof a[k] === 'object' &&
-			typeof b[k] === 'object' &&
-			(Object.keys(a[k]).length || Object.keys(b[k]).length) &&
-			!Array.isArray(a[k]) &&
-			!Array.isArray(b[k]);
-		if (needsObjectMerge) {
-			c[k] = merge(a[k] || {}, b[k] || {});
-			continue;
-		}
-		c[k] = a[k];
-		if (b[k] !== undefined) c[k] = b[k];
+function parseAddressToHost(address) {
+	if (address?.startsWith('::')) {
+		return `[${address}]`;
 	}
-	return c;
+	return address;
 }
 
 const cliPath = fileURLToPath(new URL('../astro.js', import.meta.url));
 
 /** Returns a process running the Astro CLI. */
 export function cli(/** @type {string[]} */ ...args) {
-	const spawned = execa('node', [cliPath, ...args]);
+	const spawned = execa('node', [cliPath, ...args], {
+		env: { ASTRO_TELEMETRY_DISABLED: true },
+	});
 
 	spawned.stdout.setEncoding('utf8');
 
@@ -182,7 +302,7 @@ export async function parseCliDevStart(proc) {
 	const messages = stdout
 		.split('\n')
 		.filter((ln) => !!ln.trim())
-		.map((ln) => ln.replace(/[🚀┃]/g, '').replace(/\s+/g, ' ').trim());
+		.map((ln) => ln.replace(/[🚀┃]/gu, '').replace(/\s+/g, ' ').trim());
 
 	return { messages };
 }
@@ -198,4 +318,24 @@ export async function cliServerLogSetup(flags = [], cmd = 'dev') {
 	return { local, network };
 }
 
+export const isLinux = os.platform() === 'linux';
+export const isMacOS = os.platform() === 'darwin';
 export const isWindows = os.platform() === 'win32';
+
+export function fixLineEndings(str) {
+	return str.replace(/\r\n/g, '\n');
+}
+
+export async function* streamAsyncIterator(stream) {
+	const reader = stream.getReader();
+
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) return;
+			yield value;
+		}
+	} finally {
+		reader.releaseLock();
+	}
+}

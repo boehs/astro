@@ -1,24 +1,20 @@
+import type { AstroIntegration } from 'astro';
 import { readFileSync } from 'node:fs';
-import type { AstroConfig, AstroIntegration } from 'astro';
 
 function getViteConfiguration() {
 	return {
 		optimizeDeps: {
 			include: [
+				'@astrojs/lit/dist/client.js',
 				'@astrojs/lit/client-shim.js',
 				'@astrojs/lit/hydration-support.js',
 				'@webcomponents/template-shadowroot/template-shadowroot.js',
-				'lit/experimental-hydrate-support.js',
+				'@lit-labs/ssr-client/lit-element-hydrate-support.js',
 			],
 			exclude: ['@astrojs/lit/server.js'],
 		},
 		ssr: {
-			external: [
-				'lit-element/lit-element.js',
-				'@lit-labs/ssr/lib/install-global-dom-shim.js',
-				'@lit-labs/ssr/lib/render-lit-html.js',
-				'@lit-labs/ssr/lib/lit-element-renderer.js',
-			],
+			external: ['lit-element', '@lit-labs/ssr', '@astrojs/lit', 'lit/decorators.js'],
 		},
 	};
 }
@@ -39,6 +35,7 @@ export default function (): AstroIntegration {
 				addRenderer({
 					name: '@astrojs/lit',
 					serverEntrypoint: '@astrojs/lit/server.js',
+					clientEntrypoint: '@astrojs/lit/dist/client.js',
 				});
 				// Update the vite configuration.
 				updateConfig({

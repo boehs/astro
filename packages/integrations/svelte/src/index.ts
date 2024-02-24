@@ -1,30 +1,58 @@
-import type { AstroIntegration, AstroRenderer } from 'astro';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
-import preprocess from 'svelte-preprocess';
 import type { Options } from '@sveltejs/vite-plugin-svelte';
+import { svelte, vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+import type { AstroIntegration, AstroRenderer } from 'astro';
+import { fileURLToPath } from 'node:url';
+import { VERSION } from 'svelte/compiler';
+import type { UserConfig } from 'vite';
+
+const isSvelte5 = Number.parseInt(VERSION.split('.').at(0)!) >= 5;
 
 function getRenderer(): AstroRenderer {
 	return {
 		name: '@astrojs/svelte',
-		clientEntrypoint: '@astrojs/svelte/client.js',
-		serverEntrypoint: '@astrojs/svelte/server.js',
+		clientEntrypoint: isSvelte5 ? '@astrojs/svelte/client-v5.js' : '@astrojs/svelte/client.js',
+		serverEntrypoint: isSvelte5 ? '@astrojs/svelte/server-v5.js' : '@astrojs/svelte/server.js',
 	};
 }
 
-function getViteConfiguration(isDev: boolean, options?: Options | OptionsCallback) {
-	const defaultOptions = {
+async function svelteConfigHasPreprocess(root: URL) {
+	const svelteConfigFiles = ['./svelte.config.js', './svelte.config.cjs', './svelte.config.mjs'];
+	for (const file of svelteConfigFiles) {
+		const filePath = fileURLToPath(new URL(file, root));
+		try {
+			// Suppress warnings by vite: "The above dynamic import cannot be analyzed by Vite."
+			const config = (await import(/* @vite-ignore */ filePath)).default;
+			return !!config.preprocess;
+		} catch {}
+	}
+}
+
+type ViteConfigurationArgs = {
+	isDev: boolean;
+	options?: Options | OptionsCallback;
+	root: URL;
+};
+
+async function getViteConfiguration({
+	options,
+	isDev,
+	root,
+}: ViteConfigurationArgs): Promise<UserConfig> {
+	const defaultOptions: Partial<Options> = {
 		emitCss: true,
-		compilerOptions: { dev: isDev, hydratable: true },
-		preprocess: [
-			preprocess({
-				less: true,
-				sass: { renderSync: true },
-				scss: { renderSync: true },
-				stylus: true,
-				typescript: true,
-			}),
-		],
+		compilerOptions: { dev: isDev },
 	};
+
+	// `hydratable` does not need to be set in Svelte 5 as it's always hydratable by default
+	if (!isSvelte5) {
+		// @ts-ignore ignore Partial type above
+		defaultOptions.compilerOptions.hydratable = true;
+	}
+
+	// Disable hot mode during the build
+	if (!isDev) {
+		defaultOptions.hot = false;
+	}
 
 	let resolvedOptions: Partial<Options>;
 
@@ -41,15 +69,17 @@ function getViteConfiguration(isDev: boolean, options?: Options | OptionsCallbac
 				// Always use dev and hydratable from defaults
 				...defaultOptions.compilerOptions,
 			},
-			// Ignore default preprocessor if the user provided their own
-			preprocess: options.preprocess ?? defaultOptions.preprocess,
 		};
+	}
+
+	if (!resolvedOptions.preprocess && !(await svelteConfigHasPreprocess(root))) {
+		resolvedOptions.preprocess = vitePreprocess();
 	}
 
 	return {
 		optimizeDeps: {
-			include: ['@astrojs/svelte/client.js', 'svelte', 'svelte/internal'],
-			exclude: ['@astrojs/svelte/server.js'],
+			include: [isSvelte5 ? '@astrojs/svelte/client-v5.js' : '@astrojs/svelte/client.js'],
+			exclude: [isSvelte5 ? '@astrojs/svelte/server-v5.js' : '@astrojs/svelte/server.js'],
 		},
 		plugins: [svelte(resolvedOptions)],
 	};
@@ -61,10 +91,18 @@ export default function (options?: Options | OptionsCallback): AstroIntegration 
 		name: '@astrojs/svelte',
 		hooks: {
 			// Anything that gets returned here is merged into Astro Config
-			'astro:config:setup': ({ command, updateConfig, addRenderer }) => {
+			'astro:config:setup': async ({ command, updateConfig, addRenderer, config }) => {
 				addRenderer(getRenderer());
-				updateConfig({ vite: getViteConfiguration(command === 'dev', options) });
+				updateConfig({
+					vite: await getViteConfiguration({
+						options,
+						isDev: command === 'dev',
+						root: config.root,
+					}),
+				});
 			},
 		},
 	};
 }
+
+export { vitePreprocess };

@@ -30,18 +30,18 @@
  * THE SOFTWARE.
  */
 
-import * as fs from 'fs';
-import { join, normalize, resolve } from 'path';
+import * as fs from 'node:fs';
+import { join, normalize, resolve } from 'node:path';
 // import { totalist } from 'totalist/sync';
 // import { parse } from '@polka/url';
 import { lookup } from 'mrmime';
-import { URL } from 'url';
+import { URL } from 'node:url';
 
 const noop = () => {};
 
 function isMatch(uri, arr) {
-	for (let i = 0; i < arr.length; i++) {
-		if (arr[i].test(uri)) return true;
+	for (const candidate of arr) {
+		if (candidate.test(uri)) return true;
 	}
 }
 
@@ -175,7 +175,9 @@ export default function (dir, opts = {}) {
 
 	let ignores = [];
 	if (opts.ignores !== false) {
-		ignores.push(/[/]([A-Za-z\s\d~$._-]+\.\w+){1,}$/); // any extn
+		// Disable eslint as we're not sure how to improve this regex yet
+		// eslint-disable-next-line regexp/no-super-linear-backtracking
+		ignores.push(/\/([\w\s~$.-]+\.\w+)+$/); // any extn
 		if (opts.dotfiles) ignores.push(/\/\.\w/);
 		else ignores.push(/\/\.well-known/);
 		[].concat(opts.ignores || []).forEach((x) => {
@@ -189,9 +191,9 @@ export default function (dir, opts = {}) {
 
 	if (!opts.dev) {
 		totalist(dir, (name, abs, stats) => {
-			if (/\.well-known[\\+\/]/.test(name)) {
+			if (/\.well-known[\\+/]/.test(name)) {
 			} // keep
-			else if (!opts.dotfiles && /(^\.|[\\+|\/+]\.)/.test(name)) return;
+			else if (!opts.dotfiles && /^\.|[\\+|/]\./.test(name)) return;
 
 			let headers = toHeaders(name, stats, isEtag);
 			if (cc) headers['Cache-Control'] = cc;
@@ -200,7 +202,7 @@ export default function (dir, opts = {}) {
 		});
 	}
 
-	let lookup = opts.dev ? viaLocal.bind(0, dir, isEtag) : viaCache.bind(0, FILES);
+	let fileLookup = opts.dev ? viaLocal.bind(0, dir, isEtag) : viaCache.bind(0, FILES);
 
 	return function (req, res, next) {
 		let extns = [''];
@@ -212,7 +214,7 @@ export default function (dir, opts = {}) {
 		// NEW END
 		let val = req.headers['accept-encoding'] || '';
 		if (gzips && val.includes('gzip')) extns.unshift(...gzips);
-		if (brots && /(br|brotli)/i.test(val)) extns.unshift(...brots);
+		if (brots && /br/i.test(val)) extns.unshift(...brots);
 		extns.push(...extensions); // [...br, ...gz, orig, ...exts]
 
 		if (pathname.indexOf('%') !== -1) {
@@ -224,7 +226,8 @@ export default function (dir, opts = {}) {
 		}
 
 		let data =
-			lookup(pathname, extns) || (isSPA && !isMatch(pathname, ignores) && lookup(fallback, extns));
+			fileLookup(pathname, extns) ||
+			(isSPA && !isMatch(pathname, ignores) && fileLookup(fallback, extns));
 		if (!data) return next ? next() : isNotFound(req, res);
 
 		if (isEtag && req.headers['if-none-match'] === data.headers['ETag']) {

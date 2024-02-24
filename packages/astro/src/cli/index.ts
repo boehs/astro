@@ -1,27 +1,8 @@
 /* eslint-disable no-console */
-
-import type { AstroConfig } from '../@types/astro';
-import { LogOptions } from '../core/logger/core.js';
-
 import * as colors from 'kleur/colors';
 import yargs from 'yargs-parser';
-import { z } from 'zod';
-import { AstroTelemetry } from '@astrojs/telemetry';
-import * as event from '@astrojs/telemetry/events';
+import { ASTRO_VERSION } from '../core/constants.js';
 
-import { nodeLogDestination, enableVerboseLogging } from '../core/logger/node.js';
-import build from '../core/build/index.js';
-import add from '../core/add/index.js';
-import devServer from '../core/dev/index.js';
-import preview from '../core/preview/index.js';
-import { check } from './check.js';
-import { openInBrowser } from './open.js';
-import * as telemetryHandler from './telemetry.js';
-import { loadConfig } from '../core/config.js';
-import { printHelp, formatErrorMessage, formatConfigErrorMessage } from '../core/messages.js';
-import { createSafeError } from '../core/util.js';
-
-type Arguments = yargs.Arguments;
 type CLICommand =
 	| 'help'
 	| 'version'
@@ -30,197 +11,198 @@ type CLICommand =
 	| 'dev'
 	| 'build'
 	| 'preview'
-	| 'reload'
+	| 'db'
+	| 'sync'
 	| 'check'
+	| 'info'
+	| 'preferences'
 	| 'telemetry';
 
 /** Display --help flag */
-function printAstroHelp() {
+async function printAstroHelp() {
+	const { printHelp } = await import('../core/messages.js');
 	printHelp({
 		commandName: 'astro',
-		headline: 'Futuristic web development tool.',
-		commands: [
-			['add', 'Add an integration to your configuration.'],
-			['docs', "Launch Astro's Doc site directly from the terminal. "],
-			['dev', 'Run Astro in development mode.'],
-			['build', 'Build a pre-compiled production-ready site.'],
-			['preview', 'Preview your build locally before deploying.'],
-			['check', 'Check your project for errors.'],
-			['telemetry', 'Enable/disable anonymous data collection.'],
-			['--version', 'Show the version number and exit.'],
-			['--help', 'Show this help message.'],
-		],
-		flags: [
-			['--host [optional IP]', 'Expose server on network'],
-			['--config <path>', 'Specify the path to the Astro config file.'],
-			['--root <path>', 'Specify the path to the project root folder.'],
-			['--drafts', 'Include markdown draft pages in the build.'],
-			['--verbose', 'Enable verbose logging'],
-			['--silent', 'Disable logging'],
-		],
+		usage: '[command] [...flags]',
+		headline: 'Build faster websites.',
+		tables: {
+			Commands: [
+				['add', 'Add an integration.'],
+				['build', 'Build your project and write it to disk.'],
+				['check', 'Check your project for errors.'],
+				['db', 'Manage your Astro database.'],
+				['dev', 'Start the development server.'],
+				['docs', 'Open documentation in your web browser.'],
+				['info', 'List info about your current Astro setup.'],
+				['preview', 'Preview your build locally.'],
+				['sync', 'Generate content collection types.'],
+				['preferences', 'Configure user preferences.'],
+				['telemetry', 'Configure telemetry settings.'],
+			],
+			'Global Flags': [
+				['--config <path>', 'Specify your config file.'],
+				['--root <path>', 'Specify your project root folder.'],
+				['--site <url>', 'Specify your project site.'],
+				['--base <pathname>', 'Specify your project base.'],
+				['--verbose', 'Enable verbose logging.'],
+				['--silent', 'Disable all logging.'],
+				['--version', 'Show the version number and exit.'],
+				['--help', 'Show this help message.'],
+			],
+		},
 	});
 }
 
 /** Display --version flag */
-async function printVersion() {
-	// PACKAGE_VERSION is injected at build time
-	const version = process.env.PACKAGE_VERSION ?? '';
+function printVersion() {
 	console.log();
-	console.log(`  ${colors.bgGreen(colors.black(` astro `))} ${colors.green(`v${version}`)}`);
+	console.log(`  ${colors.bgGreen(colors.black(` astro `))} ${colors.green(`v${ASTRO_VERSION}`)}`);
 }
 
 /** Determine which command the user requested */
-function resolveCommand(flags: Arguments): CLICommand {
+function resolveCommand(flags: yargs.Arguments): CLICommand {
 	const cmd = flags._[2] as string;
-	if (cmd === 'add') return 'add';
-	if (cmd === 'telemetry') return 'telemetry';
 	if (flags.version) return 'version';
-	else if (flags.help) return 'help';
 
-	const supportedCommands = new Set(['dev', 'build', 'preview', 'check', 'docs']);
+	const supportedCommands = new Set([
+		'add',
+		'sync',
+		'telemetry',
+		'preferences',
+		'dev',
+		'build',
+		'preview',
+		'check',
+		'docs',
+		'db',
+		'info',
+		'login',
+		'loutout',
+		'link',
+		'init',
+	]);
 	if (supportedCommands.has(cmd)) {
 		return cmd as CLICommand;
 	}
 	return 'help';
 }
 
-/** The primary CLI action */
-export async function cli(args: string[]) {
-	const flags = yargs(args);
-	const cmd = resolveCommand(flags);
-	const root = flags.root;
-
+/**
+ * Run the given command with the given flags.
+ * NOTE: This function provides no error handling, so be sure
+ * to present user-friendly error output where the fn is called.
+ **/
+async function runCommand(cmd: string, flags: yargs.Arguments) {
+	// These commands can run directly without parsing the user config.
 	switch (cmd) {
 		case 'help':
-			printAstroHelp();
-			return process.exit(0);
+			await printAstroHelp();
+			return;
 		case 'version':
-			await printVersion();
-			return process.exit(0);
-	}
-
-	// logLevel
-	let logging: LogOptions = {
-		dest: nodeLogDestination,
-		level: 'info',
-	};
-	if (flags.verbose) {
-		logging.level = 'debug';
-		enableVerboseLogging();
-	} else if (flags.silent) {
-		logging.level = 'silent';
-	}
-	const telemetry = new AstroTelemetry({ version: process.env.PACKAGE_VERSION ?? '' });
-
-	if (cmd === 'telemetry') {
-		try {
+			printVersion();
+			return;
+		case 'info': {
+			const { printInfo } = await import('./info/index.js');
+			await printInfo({ flags });
+			return;
+		}
+		case 'docs': {
+			const { docs } = await import('./docs/index.js');
+			await docs({ flags });
+			return;
+		}
+		case 'telemetry': {
+			// Do not track session start, since the user may be trying to enable,
+			// disable, or modify telemetry settings.
+			const { update } = await import('./telemetry/index.js');
 			const subcommand = flags._[3]?.toString();
-			return await telemetryHandler.update(subcommand, { flags, telemetry });
-		} catch (err) {
-			return throwAndExit(err);
+			await update(subcommand, { flags });
+			return;
+		}
+		case 'sync': {
+			const { sync } = await import('./sync/index.js');
+			const exitCode = await sync({ flags });
+			return process.exit(exitCode);
+		}
+		case 'preferences': {
+			const { preferences } = await import('./preferences/index.js');
+			const [subcommand, key, value] = flags._.slice(3).map((v) => v.toString());
+			const exitCode = await preferences(subcommand, key, value, { flags });
+			return process.exit(exitCode);
 		}
 	}
 
+	// In verbose/debug mode, we log the debug logs asap before any potential errors could appear
+	if (flags.verbose) {
+		const { enableVerboseLogging } = await import('../core/logger/node.js');
+		enableVerboseLogging();
+	}
+
+	const { notify } = await import('./telemetry/index.js');
+	await notify();
+
+	// These commands uses the logging and user config. All commands are assumed to have been handled
+	// by the end of this switch statement.
 	switch (cmd) {
 		case 'add': {
-			try {
-				const packages = flags._.slice(3) as string[];
-				telemetry.record(
-					event.eventCliSession({
-						astroVersion: process.env.PACKAGE_VERSION ?? '',
-						cliCommand: 'add',
-					})
-				);
-				return await add(packages, { cwd: root, flags, logging, telemetry });
-			} catch (err) {
-				return throwAndExit(err);
-			}
+			const { add } = await import('./add/index.js');
+			const packages = flags._.slice(3) as string[];
+			await add(packages, { flags });
+			return;
+		}
+		case 'db':
+		case 'login':
+		case 'logout':
+		case 'link':
+		case 'init': {
+			const { db } = await import('./db/index.js');
+			await db({ flags });
+			return;
 		}
 		case 'dev': {
-			try {
-				const config = await loadConfig({ cwd: root, flags, cmd });
-				telemetry.record(
-					event.eventCliSession(
-						{ astroVersion: process.env.PACKAGE_VERSION ?? '', cliCommand: 'dev' },
-						config
-					)
-				);
-				await devServer(config, { logging, telemetry });
+			const { dev } = await import('./dev/index.js');
+			const server = await dev({ flags });
+			if (server) {
 				return await new Promise(() => {}); // lives forever
-			} catch (err) {
-				return throwAndExit(err);
 			}
+			return;
 		}
-
 		case 'build': {
-			try {
-				const config = await loadConfig({ cwd: root, flags, cmd });
-				telemetry.record(
-					event.eventCliSession(
-						{ astroVersion: process.env.PACKAGE_VERSION ?? '', cliCommand: 'build' },
-						config
-					)
-				);
-				return await build(config, { logging, telemetry });
-			} catch (err) {
-				return throwAndExit(err);
-			}
+			const { build } = await import('./build/index.js');
+			await build({ flags });
+			return;
 		}
-
-		case 'check': {
-			const config = await loadConfig({ cwd: root, flags, cmd });
-			telemetry.record(
-				event.eventCliSession(
-					{ astroVersion: process.env.PACKAGE_VERSION ?? '', cliCommand: 'check' },
-					config
-				)
-			);
-			const ret = await check(config);
-			return process.exit(ret);
-		}
-
 		case 'preview': {
-			try {
-				const config = await loadConfig({ cwd: root, flags, cmd });
-				telemetry.record(
-					event.eventCliSession(
-						{ astroVersion: process.env.PACKAGE_VERSION ?? '', cliCommand: 'preview' },
-						config
-					)
-				);
-				const server = await preview(config, { logging, telemetry });
+			const { preview } = await import('./preview/index.js');
+			const server = await preview({ flags });
+			if (server) {
 				return await server.closed(); // keep alive until the server is closed
-			} catch (err) {
-				return throwAndExit(err);
 			}
+			return;
 		}
-
-		case 'docs': {
-			try {
-				await telemetry.record(
-					event.eventCliSession({
-						astroVersion: process.env.PACKAGE_VERSION ?? '',
-						cliCommand: 'docs',
-					})
-				);
-				return await openInBrowser('https://docs.astro.build/');
-			} catch (err) {
-				return throwAndExit(err);
+		case 'check': {
+			const { check } = await import('./check/index.js');
+			const checkServer = await check(flags);
+			if (flags.watch) {
+				return await new Promise(() => {}); // lives forever
+			} else {
+				return process.exit(checkServer ? 1 : 0);
 			}
-		}
-
-		default: {
-			throw new Error(`Error running ${cmd}`);
 		}
 	}
+
+	// No command handler matched! This is unexpected.
+	throw new Error(`Error running ${cmd} -- no command found.`);
 }
 
-/** Display error and exit */
-function throwAndExit(err: unknown) {
-	if (err instanceof z.ZodError) {
-		console.error(formatConfigErrorMessage(err));
-	} else {
-		console.error(formatErrorMessage(createSafeError(err)));
+/** The primary CLI action */
+export async function cli(args: string[]) {
+	const flags = yargs(args, { boolean: ['global'], alias: { g: 'global' } });
+	const cmd = resolveCommand(flags);
+	try {
+		await runCommand(cmd, flags);
+	} catch (err) {
+		const { throwAndExit } = await import('./throw-and-exit.js');
+		await throwAndExit(cmd, err);
 	}
-	process.exit(1);
 }

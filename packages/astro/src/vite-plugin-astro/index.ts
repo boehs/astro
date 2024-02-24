@@ -1,266 +1,231 @@
+import type { SourceDescription } from 'rollup';
 import type * as vite from 'vite';
-import type { PluginContext } from 'rollup';
-import type { AstroConfig } from '../@types/astro';
-import type { LogOptions } from '../core/logger/core.js';
+import type { AstroConfig, AstroSettings } from '../@types/astro.js';
+import type { Logger } from '../core/logger/core.js';
+import type { PluginMetadata as AstroPluginMetadata, CompileMetadata } from './types.js';
 
-import esbuild from 'esbuild';
-import { fileURLToPath } from 'url';
-import slash from 'slash';
-import fs from 'fs';
-import { getViteTransform, TransformHook } from './styles.js';
+import { normalizePath } from 'vite';
+import { normalizeFilename } from '../vite-plugin-utils/index.js';
+import { compileAstro, type CompileAstroResult } from './compile.js';
+import { handleHotUpdate } from './hmr.js';
 import { parseAstroRequest } from './query.js';
-import { cachedCompilation } from './compile.js';
-import ancestor from 'common-ancestor-path';
-import { trackCSSDependencies, handleHotUpdate } from './hmr.js';
-import { isRelativePath, startsWithForwardSlash } from '../core/path.js';
-import { PAGE_SCRIPT_ID, PAGE_SSR_SCRIPT_ID } from '../vite-plugin-scripts/index.js';
-import { resolvePages } from '../core/util.js';
+import { loadId } from './utils.js';
+export { getAstroMetadata } from './metadata.js';
+export type { AstroPluginMetadata };
 
-const FRONTMATTER_PARSE_REGEXP = /^\-\-\-(.*)^\-\-\-/ms;
 interface AstroPluginOptions {
-	config: AstroConfig;
-	logging: LogOptions;
+	settings: AstroSettings;
+	logger: Logger;
 }
 
+const astroFileToCompileMetadataWeakMap = new WeakMap<AstroConfig, Map<string, CompileMetadata>>();
+
 /** Transform .astro files for Vite */
-export default function astro({ config, logging }: AstroPluginOptions): vite.Plugin {
-	function normalizeFilename(filename: string) {
-		if (filename.startsWith('/@fs')) {
-			filename = filename.slice('/@fs'.length);
-		} else if (filename.startsWith('/') && !ancestor(filename, config.root.pathname)) {
-			filename = new URL('.' + filename, config.root).pathname;
-		}
-		return filename;
-	}
-	function relativeToRoot(pathname: string) {
-		const arg = startsWithForwardSlash(pathname) ? '.' + pathname : pathname;
-		const url = new URL(arg, config.root);
-		return slash(fileURLToPath(url)) + url.search;
-	}
+export default function astro({ settings, logger }: AstroPluginOptions): vite.Plugin[] {
+	const { config } = settings;
+	let server: vite.ViteDevServer | undefined;
+	let compile: (code: string, filename: string) => Promise<CompileAstroResult>;
+	// Each Astro file has its own compile metadata so that its scripts and styles virtual module
+	// can retrieve their code from here.
+	// NOTE: We need to initialize a map here and in `buildStart` because our unit tests don't
+	// call `buildStart` (test bug)
+	let astroFileToCompileMetadata = new Map<string, CompileMetadata>();
 
-	let resolvedConfig: vite.ResolvedConfig;
-	let viteTransform: TransformHook;
-	let viteDevServer: vite.ViteDevServer | null = null;
-
-	// Variables for determing if an id starts with /src...
+	// Variables for determining if an id starts with /src...
 	const srcRootWeb = config.srcDir.pathname.slice(config.root.pathname.length - 1);
-	const isBrowserPath = (path: string) => path.startsWith(srcRootWeb);
+	const isBrowserPath = (path: string) => path.startsWith(srcRootWeb) && srcRootWeb !== '/';
 
-	return {
+	const prePlugin: vite.Plugin = {
 		name: 'astro:build',
 		enforce: 'pre', // run transforms before other plugins can
-		configResolved(_resolvedConfig) {
-			resolvedConfig = _resolvedConfig;
-			viteTransform = getViteTransform(resolvedConfig);
+		configResolved(viteConfig) {
+			// Initialize `compile` function to simplify usage later
+			compile = (code, filename) => {
+				return compileAstro({
+					compileProps: {
+						astroConfig: config,
+						viteConfig,
+						preferences: settings.preferences,
+						filename,
+						source: code,
+					},
+					astroFileToCompileMetadata,
+					logger,
+				});
+			};
 		},
-		configureServer(server) {
-			viteDevServer = server;
+		configureServer(_server) {
+			server = _server;
+			// Make sure deleted files are removed from the compile metadata to save memory
+			server.watcher.on('unlink', (filename) => {
+				astroFileToCompileMetadata.delete(filename);
+			});
 		},
-		// note: don’t claim .astro files with resolveId() — it prevents Vite from transpiling the final JS (import.meta.globEager, etc.)
-		async resolveId(id, from) {
-			// If resolving from an astro subresource such as a hoisted script,
-			// we need to resolve relative paths ourselves.
-			if (from) {
-				const { query: fromQuery, filename } = parseAstroRequest(from);
-				if (fromQuery.astro && isRelativePath(id) && fromQuery.type === 'script') {
-					const resolvedURL = new URL(id, `file://${filename}`);
-					const resolved = resolvedURL.pathname;
-					if (isBrowserPath(resolved)) {
-						return relativeToRoot(resolved + resolvedURL.search);
-					}
-					return slash(fileURLToPath(resolvedURL)) + resolvedURL.search;
-				}
-			}
+		buildStart() {
+			astroFileToCompileMetadata = new Map();
 
-			// serve sub-part requests (*?astro) as virtual modules
-			const { query } = parseAstroRequest(id);
-			if (query.astro) {
-				// Convert /src/pages/index.astro?astro&type=style to /Users/name/
-				// Because this needs to be the id for the Vite CSS plugin to property resolve
-				// relative @imports.
-				if (query.type === 'style' && isBrowserPath(id)) {
-					return relativeToRoot(id);
-				}
-
-				return id;
+			// Share the `astroFileToCompileMetadata` across the same Astro config as Astro performs
+			// multiple builds and its hoisted scripts analyzer requires the compile metadata from
+			// previous builds. Ideally this should not be needed when we refactor hoisted scripts analysis.
+			if (astroFileToCompileMetadataWeakMap.has(config)) {
+				astroFileToCompileMetadata = astroFileToCompileMetadataWeakMap.get(config)!;
+			} else {
+				astroFileToCompileMetadataWeakMap.set(config, astroFileToCompileMetadata);
 			}
 		},
-		async load(this: PluginContext, id, opts) {
+		async load(id, opts) {
 			const parsedId = parseAstroRequest(id);
 			const query = parsedId.query;
-			if (!id.endsWith('.astro') && !query.astro) {
+			if (!query.astro) {
 				return null;
 			}
 
-			const filename = normalizeFilename(parsedId.filename);
-			const fileUrl = new URL(`file://${filename}`);
-			let source = await fs.promises.readFile(fileUrl, 'utf-8');
-			const isPage = fileUrl.pathname.startsWith(resolvePages(config).pathname);
-			if (isPage && config._ctx.scripts.some((s) => s.stage === 'page')) {
-				source += `\n<script src="${PAGE_SCRIPT_ID}" />`;
+			// Astro scripts and styles virtual module code comes from the main Astro compilation
+			// through the metadata from `astroFileToCompileMetadata`. It should always exist as Astro
+			// modules are compiled first, then its virtual modules.
+			const filename = normalizePath(normalizeFilename(parsedId.filename, config.root));
+			let compileMetadata = astroFileToCompileMetadata.get(filename);
+			// If `compileMetadata` doesn't exist in dev, that means the virtual module may have been invalidated.
+			// We try to re-compile the main Astro module (`filename`) first before retrieving the metadata again.
+			if (!compileMetadata && server) {
+				const code = await loadId(server.pluginContainer, filename);
+				// `compile` should re-set `filename` in `astroFileToCompileMetadata`
+				if (code != null) await compile(code, filename);
+				compileMetadata = astroFileToCompileMetadata.get(filename);
 			}
-			if (query.astro) {
-				if (query.type === 'style') {
+			// If the metadata still doesn't exist, that means the virtual modules are somehow compiled first,
+			// throw an error and we should investigate it.
+			if (!compileMetadata) {
+				throw new Error(
+					`No cached compile metadata found for "${id}". The main Astro module "${filename}" should have ` +
+						`compiled and filled the metadata first, before its virtual modules can be requested.`
+				);
+			}
+
+			switch (query.type) {
+				case 'style': {
 					if (typeof query.index === 'undefined') {
 						throw new Error(`Requests for Astro CSS must include an index.`);
 					}
 
-					const transformResult = await cachedCompilation(config, filename, source, viteTransform, {
-						ssr: Boolean(opts?.ssr),
-					});
+					const result = compileMetadata.css[query.index];
+					if (!result) {
+						throw new Error(`No Astro CSS at index ${query.index}`);
+					}
 
-					// Track any CSS dependencies so that HMR is triggered when they change.
-					await trackCSSDependencies.call(this, {
-						viteDevServer,
-						id,
-						filename,
-						deps: transformResult.rawCSSDeps,
-					});
-					const csses = transformResult.css;
-					const code = csses[query.index];
+					// Register dependencies from preprocessing this style
+					result.dependencies?.forEach((dep) => this.addWatchFile(dep));
 
-					return {
-						code,
-					};
-				} else if (query.type === 'script') {
+					return { code: result.code };
+				}
+				case 'script': {
 					if (typeof query.index === 'undefined') {
 						throw new Error(`Requests for hoisted scripts must include an index`);
 					}
+					// HMR hoisted script only exists to make them appear in the module graph.
+					if (opts?.ssr) {
+						return {
+							code: `/* client hoisted script, empty in SSR: ${id} */`,
+						};
+					}
 
-					const transformResult = await cachedCompilation(config, filename, source, viteTransform, {
-						ssr: Boolean(opts?.ssr),
-					});
-					const scripts = transformResult.scripts;
-					const hoistedScript = scripts[query.index];
-
+					const hoistedScript = compileMetadata.scripts[query.index];
 					if (!hoistedScript) {
 						throw new Error(`No hoisted script at index ${query.index}`);
 					}
 
 					if (hoistedScript.type === 'external') {
-						const src = hoistedScript.src!;
+						const src = hoistedScript.src;
 						if (src.startsWith('/') && !isBrowserPath(src)) {
 							const publicDir = config.publicDir.pathname.replace(/\/$/, '').split('/').pop() + '/';
 							throw new Error(
-								`\n\n<script src="${src}"> references an asset in the "${publicDir}" directory. Please add the "is:inline" directive to keep this asset from being bundled.\n\nFile: ${filename}`
+								`\n\n<script src="${src}"> references an asset in the "${publicDir}" directory. Please add the "is:inline" directive to keep this asset from being bundled.\n\nFile: ${id}`
 							);
 						}
 					}
 
-					return {
-						code:
-							hoistedScript.type === 'inline'
-								? hoistedScript.code!
-								: `import "${hoistedScript.src!}";`,
+					const result: SourceDescription = {
+						code: '',
+						meta: {
+							vite: {
+								lang: 'ts',
+							},
+						},
 					};
-				}
-			}
 
-			try {
-				const transformResult = await cachedCompilation(config, filename, source, viteTransform, {
-					ssr: Boolean(opts?.ssr),
-				});
-
-				// Compile all TypeScript to JavaScript.
-				// Also, catches invalid JS/TS in the compiled output before returning.
-				const { code, map } = await esbuild.transform(transformResult.code, {
-					loader: 'ts',
-					sourcemap: 'external',
-					sourcefile: id,
-					// Pass relevant Vite options, if needed:
-					define: config.vite?.define,
-				});
-
-				let SUFFIX = '';
-				// Add HMR handling in dev mode.
-				if (!resolvedConfig.isProduction) {
-					// HACK: extract dependencies from metadata until compiler static extraction handles them
-					const metadata = transformResult.code.split('$$createMetadata(')[1].split('});\n')[0];
-					const pattern = /specifier:\s*'([^']*)'/g;
-					const deps = new Set();
-					let match;
-					while ((match = pattern.exec(metadata)?.[1])) {
-						deps.add(match);
-					}
-					// // import.meta.hot.accept(["${id}", "${Array.from(deps).join('","')}"], (...mods) => mods);
-					// We need to be self-accepting, AND
-					// we need an explicity array of deps to track changes for SSR-only components
-					SUFFIX += `\nif (import.meta.hot) {
-						import.meta.hot.accept(mod => mod);
-					}`;
-				}
-				// Add handling to inject scripts into each page JS bundle, if needed.
-				if (isPage) {
-					SUFFIX += `\nimport "${PAGE_SSR_SCRIPT_ID}";`;
-				}
-				return {
-					code: `${code}${SUFFIX}`,
-					map,
-				};
-			} catch (err: any) {
-				// Verify frontmatter: a common reason that this plugin fails is that
-				// the user provided invalid JS/TS in the component frontmatter.
-				// If the frontmatter is invalid, the `err` object may be a compiler
-				// panic or some other vague/confusing compiled error message.
-				//
-				// Before throwing, it is better to verify the frontmatter here, and
-				// let esbuild throw a more specific exception if the code is invalid.
-				// If frontmatter is valid or cannot be parsed, then continue.
-				const scannedFrontmatter = FRONTMATTER_PARSE_REGEXP.exec(source);
-				if (scannedFrontmatter) {
-					try {
-						await esbuild.transform(scannedFrontmatter[1], {
-							loader: 'ts',
-							sourcemap: false,
-							sourcefile: id,
-						});
-					} catch (frontmatterErr: any) {
-						// Improve the error by replacing the phrase "unexpected end of file"
-						// with "unexpected end of frontmatter" in the esbuild error message.
-						if (frontmatterErr && frontmatterErr.message) {
-							frontmatterErr.message = frontmatterErr.message.replace(
-								'end of file',
-								'end of frontmatter'
-							);
+					switch (hoistedScript.type) {
+						case 'inline': {
+							const { code, map } = hoistedScript;
+							result.code = appendSourceMap(code, map);
+							break;
 						}
-						throw frontmatterErr;
+						case 'external': {
+							const { src } = hoistedScript;
+							result.code = `import "${src}"`;
+							break;
+						}
 					}
+
+					return result;
 				}
-
-				// improve compiler errors
-				if (err.stack.includes('wasm-function')) {
-					const search = new URLSearchParams({
-						labels: 'compiler',
-						title: '🐛 BUG: `@astrojs/compiler` panic',
-						body: `### Describe the Bug
-    
-    \`@astrojs/compiler\` encountered an unrecoverable error when compiling the following file.
-    
-    **${id.replace(fileURLToPath(config.root), '')}**
-    \`\`\`astro
-    ${source}
-    \`\`\`
-    `,
-					});
-					err.url = `https://github.com/withastro/astro/issues/new?${search.toString()}`;
-					err.message = `Error: Uh oh, the Astro compiler encountered an unrecoverable error!
-    
-    Please open
-    a GitHub issue using the link below:
-    ${err.url}`;
-
-					if (logging.level !== 'debug') {
-						// TODO: remove stack replacement when compiler throws better errors
-						err.stack = `    at ${id}`;
-					}
-				}
-
-				throw err;
+				default:
+					return null;
 			}
 		},
-		async handleHotUpdate(context) {
-			if (context.server.config.isProduction) return;
-			return handleHotUpdate(context, config, logging);
+		async transform(source, id) {
+			const parsedId = parseAstroRequest(id);
+			// ignore astro file sub-requests, e.g. Foo.astro?astro&type=script&index=0&lang.ts
+			if (!id.endsWith('.astro') || parsedId.query.astro) {
+				return;
+			}
+
+			const filename = normalizePath(parsedId.filename);
+			const transformResult = await compile(source, filename);
+
+			const astroMetadata: AstroPluginMetadata['astro'] = {
+				clientOnlyComponents: transformResult.clientOnlyComponents,
+				hydratedComponents: transformResult.hydratedComponents,
+				scripts: transformResult.scripts,
+				containsHead: transformResult.containsHead,
+				propagation: transformResult.propagation ? 'self' : 'none',
+				pageOptions: {},
+			};
+
+			return {
+				code: transformResult.code,
+				map: transformResult.map,
+				meta: {
+					astro: astroMetadata,
+					vite: {
+						// Setting this vite metadata to `ts` causes Vite to resolve .js
+						// extensions to .ts files.
+						lang: 'ts',
+					},
+				},
+			};
+		},
+		async handleHotUpdate(ctx) {
+			return handleHotUpdate(ctx, { logger, astroFileToCompileMetadata });
 		},
 	};
+
+	const normalPlugin: vite.Plugin = {
+		name: 'astro:build:normal',
+		resolveId(id) {
+			// If Vite resolver can't resolve the Astro request, it's likely a virtual Astro file, fallback here instead
+			const parsedId = parseAstroRequest(id);
+			if (parsedId.query.astro) {
+				return id;
+			}
+		},
+	};
+
+	return [prePlugin, normalPlugin];
+}
+
+function appendSourceMap(content: string, map?: string) {
+	if (!map) return content;
+	return `${content}\n//# sourceMappingURL=data:application/json;charset=utf-8;base64,${Buffer.from(
+		map
+	).toString('base64')}`;
 }

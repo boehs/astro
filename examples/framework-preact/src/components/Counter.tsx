@@ -1,11 +1,13 @@
 import { h, Fragment } from 'preact';
-import { useState } from 'preact/hooks';
+import { lazy, Suspense } from 'preact/compat';
 import './Counter.css';
 
-export default function Counter({ children }) {
-	const [count, setCount] = useState(0);
-	const add = () => setCount((i) => i + 1);
-	const subtract = () => setCount((i) => i - 1);
+const Message = lazy(async () => import('./Message'));
+const Fallback = () => <p>Loading...</p>;
+
+export default function Counter({ children, count }) {
+	const add = () => count.value++;
+	const subtract = () => count.value--;
 
 	return (
 		<>
@@ -14,7 +16,9 @@ export default function Counter({ children }) {
 				<pre>{count}</pre>
 				<button onClick={add}>+</button>
 			</div>
-			<div class="counter-message">{children}</div>
+			<Suspense fallback={Fallback}>
+				<Message>{children}</Message>
+			</Suspense>
 		</>
 	);
 }

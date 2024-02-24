@@ -1,4 +1,5 @@
-import { expect } from 'chai';
+import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import * as cheerio from 'cheerio';
 import { loadFixture } from './test-utils.js';
 
@@ -22,18 +23,11 @@ describe('Partial HTML', async () => {
 		const $ = cheerio.load(html);
 
 		// test 1: Doctype first
-		expect(html).to.match(/^<!DOCTYPE html/);
+		assert.match(html, /^<!DOCTYPE html/);
 
 		// test 2: correct CSS present
-		const link = $('link').attr('href');
-		const css = await fixture
-			.fetch(link, {
-				headers: {
-					accept: 'text/css',
-				},
-			})
-			.then((res) => res.text());
-		expect(css).to.match(/\.astro-[^{]+{color:red}/);
+		const allInjectedStyles = $('style').text();
+		assert.match(allInjectedStyles, /\[data-astro-cid-[^{]+\{color:red\}/);
 	});
 
 	it('injects framework styles', async () => {
@@ -41,10 +35,16 @@ describe('Partial HTML', async () => {
 		const $ = cheerio.load(html);
 
 		// test 1: Doctype first
-		expect(html).to.match(/^<!DOCTYPE html/);
+		assert.match(html, /^<!DOCTYPE html/);
 
 		// test 2: link tag present
-		const href = $('link[rel=stylesheet][data-astro-injected]').attr('href');
-		expect(href).to.be.ok;
+		const allInjectedStyles = $('style').text().replace(/\s*/g, '');
+		assert.match(allInjectedStyles, /h1\{color:red;\}/);
+	});
+
+	it('pages with a head, injection happens inside', async () => {
+		const html = await fixture.fetch('/with-head').then((res) => res.text());
+		const $ = cheerio.load(html);
+		assert.equal($('style').length, 1);
 	});
 });

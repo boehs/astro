@@ -1,41 +1,62 @@
-import { execa } from 'execa';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import fs from 'node:fs';
+import { before, beforeEach } from 'node:test';
+import stripAnsi from 'strip-ansi';
+import { setStdout } from '../dist/index.js';
 
-const __filename = fileURLToPath(import.meta.url);
-export const testDir = dirname(__filename);
-export const timeout = 5000;
-
-const createAstroError = new Error(
-	'Timed out waiting for create-astro to respond with expected output.'
-);
-
-export function promiseWithTimeout(testFn) {
-	return new Promise((resolve, reject) => {
-		const timeoutEvent = setTimeout(() => {
-			reject(createAstroError);
-		}, timeout);
-		function resolver() {
-			clearTimeout(timeoutEvent);
-			resolve();
-		}
-		testFn(resolver);
+export function setup() {
+	const ctx = { messages: [] };
+	before(() => {
+		setStdout(
+			Object.assign({}, process.stdout, {
+				write(buf) {
+					ctx.messages.push(stripAnsi(String(buf)).trim());
+					return true;
+				},
+			})
+		);
 	});
-}
+	beforeEach(() => {
+		ctx.messages = [];
+	});
 
-export const PROMPT_MESSAGES = {
-	directory: 'Where would you like to create your app?',
-	template: 'Which app template would you like to use?',
-	install: (pkgManager) => `Would you like us to run "${pkgManager} install?"`,
-	astroAdd: (astroAddCommand = 'npx astro@latest add --yes') =>
-		`Run "${astroAddCommand}?" This lets you optionally add component frameworks (ex. React), CSS frameworks (ex. Tailwind), and more.`,
-	git: 'Initialize a git repository?',
-};
-
-export function setup(args = []) {
-	const { stdout, stdin } = execa('../create-astro.mjs', [...args, '--dryrun'], { cwd: testDir });
 	return {
-		stdin,
-		stdout,
+		messages() {
+			return ctx.messages;
+		},
+		length() {
+			return ctx.messages.length;
+		},
+		hasMessage(content) {
+			return !!ctx.messages.find((msg) => msg.includes(content));
+		},
 	};
 }
+
+const resetEmptyFixture = () =>
+	fs.promises.rm(new URL('./fixtures/empty/tsconfig.json', import.meta.url));
+
+const resetNotEmptyFixture = async () => {
+	const packagePath = new URL('./fixtures/not-empty/package.json', import.meta.url);
+	const tsconfigPath = new URL('./fixtures/not-empty/tsconfig.json', import.meta.url);
+
+	const packageJsonData = JSON.parse(
+		await fs.promises.readFile(packagePath, { encoding: 'utf-8' })
+	);
+	const overriddenPackageJson = Object.assign(packageJsonData, {
+		scripts: {
+			dev: 'astro dev',
+			build: 'astro build',
+			preview: 'astro preview',
+		},
+	});
+
+	return Promise.all([
+		fs.promises.writeFile(packagePath, JSON.stringify(overriddenPackageJson, null, 2), {
+			encoding: 'utf-8',
+		}),
+		fs.promises.writeFile(tsconfigPath, '{}', { encoding: 'utf-8' }),
+	]);
+};
+
+export const resetFixtures = () =>
+	Promise.allSettled([resetEmptyFixture(), resetNotEmptyFixture()]);

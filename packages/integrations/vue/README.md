@@ -2,87 +2,37 @@
 
 This **[Astro integration][astro-integration]** enables server-side rendering and client-side hydration for your [Vue 3](https://vuejs.org/) components.
 
-## Installation
+## Documentation
 
-There are two ways to add integrations to your project. Let's try the most convenient option first!
+Read the [`@astrojs/vue` docs][docs]
 
-### (experimental) `astro add` command
+## Support
 
-Astro includes a CLI tool for adding first party integrations: `astro add`. This command will:
-1. (Optionally) Install all necessary dependencies and peer dependencies
-2. (Also optionally) Update your `astro.config.*` file to apply this integration
+- Get help in the [Astro Discord][discord]. Post questions in our `#support` forum, or visit our dedicated `#dev` channel to discuss current development and more!
 
-To install `@astrojs/vue`, run the following from your project directory and follow the prompts:
+- Check our [Astro Integration Documentation][astro-integration] for more on integrations.
 
-```sh
-# Using NPM
-npx astro add vue
-# Using Yarn
-yarn astro add vue
-# Using PNPM
-pnpx astro add vue
-```
+- Submit bug reports and feature requests as [GitHub issues][issues].
 
-If you run into any hiccups, [feel free to log an issue on our GitHub](https://github.com/withastro/astro/issues) and try the manual installation steps below.
+## Contributing
 
-### Install dependencies manually
+This package is maintained by Astro's Core team. You're welcome to submit an issue or PR! These links will help you get started:
 
-First, install the `@astrojs/vue` integration like so:
+- [Contributor Manual][contributing]
+- [Code of Conduct][coc]
+- [Community Guide][community]
 
-```
-npm install @astrojs/vue
-```
+## License
 
-Most package managers will install associated peer dependencies as well. Still, if you see a "Cannot find package 'vue'" (or similar) warning when you start up Astro, you'll need to install Vue:
+MIT
 
-```sh
-npm install vue
-```
+Copyright (c) 2023–present [Astro][astro]
 
-Now, apply this integration to your `astro.config.*` file using the `integrations` property:
-
-__astro.config.mjs__
-
-```js
-import vue from '@astrojs/vue';
-
-export default {
-  // ...
-  integrations: [vue()],
-}
-```
-
-## Getting started
-
-To use your first Vue component in Astro, head to our [UI framework documentation][astro-ui-frameworks]. You'll explore:
-- 📦 how framework components are loaded,
-- 💧 client-side hydration options, and
-- 🪆 opportunities to mix and nest frameworks together
-
-Also check our [Astro Integration Documentation][astro-integration] for more on integrations.
-
+[astro]: https://astro.build/
+[docs]: https://docs.astro.build/en/guides/integrations-guide/vue/
+[contributing]: https://github.com/withastro/astro/blob/main/CONTRIBUTING.md
+[coc]: https://github.com/withastro/.github/blob/main/CODE_OF_CONDUCT.md
+[community]: https://github.com/withastro/.github/blob/main/COMMUNITY_GUIDE.md
+[discord]: https://astro.build/chat/
+[issues]: https://github.com/withastro/astro/issues
 [astro-integration]: https://docs.astro.build/en/guides/integrations-guide/
-[astro-ui-frameworks]: https://docs.astro.build/en/core-concepts/framework-components/#using-framework-components
-
-## Options
-
-This integration is powered by `@vitejs/plugin-vue`. To customize the Vue compiler, options can be provided to the integration. See the `@vitejs/plugin-vue` [docs](https://github.com/vitejs/vite/tree/main/packages/plugin-vue) for more details.
-
-__astro.config.mjs__
-
-```js
-import vue from '@astrojs/vue';
-
-export default {
-  // ...
-  integrations: [vue({
-    template: {
-      compilerOptions: {
-        // treat any tag that starts with ion- as custom elements
-        isCustomElement: tag => tag.startsWith('ion-')
-      }
-    }
-    // ...
-  })],
-}
-```

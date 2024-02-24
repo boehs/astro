@@ -1,44 +1,38 @@
 # @astrojs/vercel
 
-Deploy your server-side rendered (SSR) Astro app to [Vercel](https://www.vercel.com/).
+This adapter allows Astro to deploy your SSR site to [Vercel](https://www.vercel.com/).
 
-Use this integration in your Astro configuration file:
+## Documentation
 
-```js
-import { defineConfig } from 'astro/config';
-import vercel from '@astrojs/vercel';
+Read the [`@astrojs/vercel` docs][docs]
 
-export default defineConfig({
-	adapter: vercel()
-});
-```
+## Support
 
-When you build your project, Astro will know to use the `.output` folder format that Vercel expects.
+- Get help in the [Astro Discord][discord]. Post questions in our `#support` forum, or visit our dedicated `#dev` channel to discuss current development and more!
 
-```
-astro build
-```
+- Check our [Astro Integration Documentation][astro-integration] for more on integrations.
 
-That's it! You can deploy by CLI (`vercel deploy`) or by connecting your new repo in the [Vercel Dashboard](https://vercel.com/).
+- Submit bug reports and feature requests as [GitHub issues][issues].
 
-## Requirements
+## Contributing
 
-**Vercel's [File System API](https://vercel.com/docs/file-system-api/v2) must be enabled.** You must enable it yourself by setting the environment variable: `ENABLE_FILE_SYSTEM_API=1`. 
+This package is maintained by Astro's Core team. You're welcome to submit an issue or PR! These links will help you get started:
 
-```js
-// vercel.json
-{
-  "build": {
-    "env": {
-      "ENABLE_FILE_SYSTEM_API": "1"
-    }
-  }
-}
-```
+- [Contributor Manual][contributing]
+- [Code of Conduct][coc]
+- [Community Guide][community]
 
-[Learn more about setting enviroment variables in Vercel](https://vercel.com/docs/concepts/projects/environment-variables).
+## License
 
+MIT
 
-## Limitations
+Copyright (c) 2023–present [Astro][astro]
 
-**A few known complex packages (example: [puppeteer](https://github.com/puppeteer/puppeteer)) do not support bundling and therefore will not work properly with this adapter.** By default, Vercel doesn't include npm installed files & packages from your project's `./node_modules` folder. To address this, the `@astrojs/vercel` adapter automatically bundles your final build output using `esbuild`.
+[astro]: https://astro.build/
+[docs]: https://docs.astro.build/en/guides/integrations-guide/vercel/
+[contributing]: https://github.com/withastro/astro/blob/main/CONTRIBUTING.md
+[coc]: https://github.com/withastro/.github/blob/main/CODE_OF_CONDUCT.md
+[community]: https://github.com/withastro/.github/blob/main/COMMUNITY_GUIDE.md
+[discord]: https://astro.build/chat/
+[issues]: https://github.com/withastro/astro/issues
+[astro-integration]: https://docs.astro.build/en/guides/integrations-guide/

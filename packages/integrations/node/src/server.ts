@@ -1,44 +1,27 @@
+import { NodeApp, applyPolyfills } from 'astro/app/node';
+import { createStandaloneHandler } from './standalone.js';
+import startServer from './standalone.js';
+import createMiddleware from './middleware.js';
 import type { SSRManifest } from 'astro';
-import type { IncomingMessage, ServerResponse } from 'http';
-import type { Readable } from 'stream';
-import { NodeApp } from 'astro/app/node';
-import { polyfill } from '@astrojs/webapi';
+import type { Options } from './types.js';
 
-polyfill(globalThis, {
-	exclude: 'window document',
-});
-
-export function createExports(manifest: SSRManifest) {
+applyPolyfills();
+export function createExports(manifest: SSRManifest, options: Options) {
 	const app = new NodeApp(manifest);
+	options.trailingSlash = manifest.trailingSlash;
 	return {
-		async handler(req: IncomingMessage, res: ServerResponse, next?: (err?: unknown) => void) {
-			const route = app.match(req);
-
-			if (route) {
-				try {
-					const response = await app.render(req);
-					await writeWebResponse(res, response);
-				} catch (err: unknown) {
-					if (next) {
-						next(err);
-					} else {
-						throw err;
-					}
-				}
-			} else if (next) {
-				return next();
-			}
-		},
+		options: options,
+		handler:
+			options.mode === 'middleware' ? createMiddleware(app) : createStandaloneHandler(app, options),
+		startServer: () => startServer(app, options),
 	};
 }
 
-async function writeWebResponse(res: ServerResponse, webResponse: Response) {
-	const { status, headers, body } = webResponse;
-	res.writeHead(status, Object.fromEntries(headers.entries()));
-	if (body) {
-		for await (const chunk of body as unknown as Readable) {
-			res.write(chunk);
-		}
+export function start(manifest: SSRManifest, options: Options) {
+	if (options.mode !== 'standalone' || process.env.ASTRO_NODE_AUTOSTART === 'disabled') {
+		return;
 	}
-	res.end();
+
+	const app = new NodeApp(manifest);
+	startServer(app, options);
 }

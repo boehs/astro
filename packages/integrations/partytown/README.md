@@ -2,64 +2,37 @@
 
 This **[Astro integration][astro-integration]** enables [Partytown](https://partytown.builder.io/) in your Astro project.
 
-Partytown is a lazy-loaded library to help relocate resource intensive scripts into a [web worker](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API), and off of the [main thread](https://developer.mozilla.org/en-US/docs/Glossary/Main_thread).
+## Documentation
 
-## Installation
+Read the [`@astrojs/partytown` docs][docs]
 
-There are two ways to add integrations to your project. Let's try the most convenient option first!
+## Support
 
-### (experimental) `astro add` command
+- Get help in the [Astro Discord][discord]. Post questions in our `#support` forum, or visit our dedicated `#dev` channel to discuss current development and more!
 
-Astro includes a CLI tool for adding first party integrations: `astro add`. This command will:
-1. (Optionally) Install all necessary dependencies and peer dependencies
-2. (Also optionally) Update your `astro.config.*` file to apply this integration
+- Check our [Astro Integration Documentation][astro-integration] for more on integrations.
 
-To install `@astrojs/partytown`, run the following from your project directory and follow the prompts:
+- Submit bug reports and feature requests as [GitHub issues][issues].
 
-```sh
-# Using NPM
-npx astro add partytown
-# Using Yarn
-yarn astro add partytown
-# Using PNPM
-pnpx astro add partytown
-```
+## Contributing
 
-If you run into any hiccups, [feel free to log an issue on our GitHub](https://github.com/withastro/astro/issues) and try the manual installation steps below.
+This package is maintained by Astro's Core team. You're welcome to submit an issue or PR! These links will help you get started:
 
-### Install dependencies manually
+- [Contributor Manual][contributing]
+- [Code of Conduct][coc]
+- [Community Guide][community]
 
-First, install the `@astrojs/partytown` integration like so:
+## License
 
-```
-npm install @astrojs/partytown
-```
+MIT
 
-Then, apply this integration to your `astro.config.*` file using the `integrations` property:
+Copyright (c) 2023–present [Astro][astro]
 
-__astro.config.mjs__
-
-```js
-import partytown from '@astrojs/partytown';
-
-export default {
-  // ...
-  integrations: [partytown()],
-}
-```
-
-## Getting started
-
-Partytown should be ready-to-use with zero config. If you have an existing 3rd party script on your site, try adding the `type="text/partytown"` attribute:
-
-```diff
--  <script src="fancy-analytics.js"></script>
-+  <script type="text/partytown" src="fancy-analytics.js"></script>
-```
-
-If you open the "Network" tab from [your browser's dev tools](https://developer.chrome.com/docs/devtools/open/), you should see the `partytown` proxy intercepting this request.
-
-[Head to the Partytown docs](https://partytown.builder.io/configuration) for configuration options and more usage examples. You can also check our [Astro Integration Documentation][astro-integration] for more on integrations.
-
+[astro]: https://astro.build/
+[docs]: https://docs.astro.build/en/guides/integrations-guide/partytown/
+[contributing]: https://github.com/withastro/astro/blob/main/CONTRIBUTING.md
+[coc]: https://github.com/withastro/.github/blob/main/CODE_OF_CONDUCT.md
+[community]: https://github.com/withastro/.github/blob/main/COMMUNITY_GUIDE.md
+[discord]: https://astro.build/chat/
+[issues]: https://github.com/withastro/astro/issues
 [astro-integration]: https://docs.astro.build/en/guides/integrations-guide/
-[astro-ui-frameworks]: https://docs.astro.build/en/core-concepts/framework-components/#using-framework-components

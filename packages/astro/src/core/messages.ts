@@ -1,156 +1,175 @@
-import type { AddressInfo } from 'net';
-import type { AstroConfig } from '../@types/astro';
-import os from 'os';
 import {
-	bold,
-	dim,
-	red,
-	green,
-	underline,
-	yellow,
-	bgYellow,
-	cyan,
+	bgCyan,
 	bgGreen,
-	black,
 	bgRed,
 	bgWhite,
-	bgCyan,
+	bgYellow,
+	black,
+	blue,
+	bold,
+	cyan,
+	dim,
+	green,
+	red,
+	underline,
+	yellow,
 } from 'kleur/colors';
-import boxen from 'boxen';
-import { collectErrorMetadata, cleanErrorStack } from './errors.js';
-import { ZodError } from 'zod';
-import { emoji, getLocalAddress, padMultilineString } from './util.js';
-
-const PREFIX_PADDING = 6;
+import type { ResolvedServerUrls } from 'vite';
+import type { ZodError } from 'zod';
+import { getDocsForError, renderErrorMarkdown } from './errors/dev/utils.js';
+import {
+	AstroError,
+	AstroUserError,
+	CompilerError,
+	type ErrorWithMetadata,
+} from './errors/index.js';
+import { padMultilineString } from './util.js';
 
 /** Display  */
 export function req({
 	url,
+	method,
 	statusCode,
 	reqTime,
 }: {
 	url: string;
 	statusCode: number;
+	method?: string;
 	reqTime?: number;
 }): string {
-	let color = dim;
-	if (statusCode >= 500) color = red;
-	else if (statusCode >= 400) color = yellow;
-	else if (statusCode >= 300) color = dim;
-	else if (statusCode >= 200) color = green;
-	return `${bold(color(`${statusCode}`.padStart(PREFIX_PADDING)))} ${url.padStart(40)} ${
-		reqTime ? dim(Math.round(reqTime) + 'ms') : ''
-	}`.trim();
+	const color = statusCode >= 500 ? red : statusCode >= 300 ? yellow : blue;
+	return (
+		color(`[${statusCode}]`) +
+		` ` +
+		(method && method !== 'GET' ? color(method) + ' ' : '') +
+		url +
+		` ` +
+		(reqTime ? dim(Math.round(reqTime) + 'ms') : '')
+	);
 }
 
-export function reload({ file }: { file: string }): string {
-	return `${green('reload'.padStart(PREFIX_PADDING))} ${file}`;
-}
-
-export function hmr({ file }: { file: string }): string {
-	return `${green('update'.padStart(PREFIX_PADDING))} ${file}`;
-}
-
-/** Display dev server host and startup time */
-export function devStart({
+/** Display server host and startup time */
+export function serverStart({
 	startupTime,
-	devServerAddressInfo,
-	config,
-	https,
-	site,
+	resolvedUrls,
+	host,
+	base,
 }: {
 	startupTime: number;
-	devServerAddressInfo: AddressInfo;
-	config: AstroConfig;
-	https: boolean;
-	site: URL | undefined;
+	resolvedUrls: ResolvedServerUrls;
+	host: string | boolean;
+	base: string;
 }): string {
 	// PACKAGE_VERSION is injected at build-time
 	const version = process.env.PACKAGE_VERSION ?? '0.0.0';
-	const rootPath = site ? site.pathname : '/';
 	const localPrefix = `${dim('┃')} Local    `;
 	const networkPrefix = `${dim('┃')} Network  `;
+	const emptyPrefix = ' '.repeat(11);
 
-	const { address: networkAddress, port } = devServerAddressInfo;
-	const localAddress = getLocalAddress(networkAddress, config.server.host);
-	const networkLogging = getNetworkLogging(config.server.host);
-	const toDisplayUrl = (hostname: string) =>
-		`${https ? 'https' : 'http'}://${hostname}:${port}${rootPath}`;
-	let addresses = [];
+	const localUrlMessages = resolvedUrls.local.map((url, i) => {
+		return `${i === 0 ? localPrefix : emptyPrefix}${cyan(new URL(url).origin + base)}`;
+	});
+	const networkUrlMessages = resolvedUrls.network.map((url, i) => {
+		return `${i === 0 ? networkPrefix : emptyPrefix}${cyan(new URL(url).origin + base)}`;
+	});
 
-	if (networkLogging === 'none') {
-		addresses = [`${localPrefix}${bold(cyan(toDisplayUrl(localAddress)))}`];
-	} else if (networkLogging === 'host-to-expose') {
-		addresses = [
-			`${localPrefix}${bold(cyan(toDisplayUrl(localAddress)))}`,
-			`${networkPrefix}${dim('use --host to expose')}`,
-		];
-	} else {
-		addresses = Object.values(os.networkInterfaces())
-			.flatMap((networkInterface) => networkInterface ?? [])
-			.filter(
-				(networkInterface) => networkInterface?.address && networkInterface?.family === 'IPv4'
-			)
-			.map(({ address }) => {
-				if (address.includes('127.0.0.1')) {
-					const displayAddress = address.replace('127.0.0.1', localAddress);
-					return `${localPrefix}${bold(cyan(toDisplayUrl(displayAddress)))}`;
-				} else {
-					return `${networkPrefix}${bold(cyan(toDisplayUrl(address)))}`;
-				}
-			})
-			// ensure Local logs come before Network
-			.sort((msg) => (msg.startsWith(localPrefix) ? -1 : 1));
+	if (networkUrlMessages.length === 0) {
+		const networkLogging = getNetworkLogging(host);
+		if (networkLogging === 'host-to-expose') {
+			networkUrlMessages.push(`${networkPrefix}${dim('use --host to expose')}`);
+		} else if (networkLogging === 'visible') {
+			networkUrlMessages.push(`${networkPrefix}${dim('unable to find network to expose')}`);
+		}
 	}
 
 	const messages = [
-		`${emoji('🚀 ', '')}${bgGreen(black(` astro `))} ${green(`v${version}`)} ${dim(
-			`started in ${Math.round(startupTime)}ms`
-		)}`,
 		'',
-		...addresses,
+		`${bgGreen(bold(` astro `))} ${green(`v${version}`)} ${dim(`ready in`)} ${Math.round(
+			startupTime
+		)} ${dim('ms')}`,
+		'',
+		...localUrlMessages,
+		...networkUrlMessages,
 		'',
 	];
-	return messages.map((msg) => `  ${msg}`).join('\n');
+	return messages.filter((msg) => typeof msg === 'string').join('\n');
+}
+
+/** Display custom dev server shortcuts */
+export function serverShortcuts({ key, label }: { key: string; label: string }): string {
+	return [dim('  Press'), key, dim('to'), label].join(' ');
 }
 
 export function telemetryNotice() {
-	const headline = yellow(`Astro now collects ${bold('anonymous')} usage data.`);
-	const why = `This ${bold('optional program')} will help shape our roadmap.`;
-	const more = `For more info, visit ${underline('https://astro.build/telemetry')}`;
-	const box = boxen([headline, why, '', more].join('\n'), {
-		margin: 0,
-		padding: 1,
-		borderStyle: 'round',
-		borderColor: 'yellow',
-	});
-	return box;
+	const headline = blue(`▶ Astro collects anonymous usage data.`);
+	const why = '  This information helps us improve Astro.';
+	const disable = `  Run "astro telemetry disable" to opt-out.`;
+	const details = `  ${cyan(underline('https://astro.build/telemetry'))}`;
+	return [headline, why, disable, details].join('\n');
 }
 
 export function telemetryEnabled() {
-	return `\n  ${green('◉')} Anonymous telemetry is ${bgGreen(
-		black(' enabled ')
-	)}. Thank you for improving Astro!\n`;
+	return [
+		green('▶ Anonymous telemetry ') + bgGreen(' enabled '),
+		`  Thank you for helping us improve Astro!`,
+		``,
+	].join('\n');
+}
+
+export function preferenceEnabled(name: string) {
+	return `${green('◉')} ${name} is now ${bgGreen(black(' enabled '))}\n`;
+}
+
+export function preferenceSet(name: string, value: any) {
+	return `${green('◉')} ${name} has been set to ${bgGreen(black(` ${JSON.stringify(value)} `))}\n`;
+}
+
+export function preferenceGet(name: string, value: any) {
+	return `${green('◉')} ${name} is set to ${bgGreen(black(` ${JSON.stringify(value)} `))}\n`;
+}
+
+export function preferenceDefaultIntro(name: string) {
+	return `${yellow('◯')} ${name} has not been set. It defaults to\n`;
+}
+
+export function preferenceDefault(name: string, value: any) {
+	return `${yellow('◯')} ${name} has not been set. It defaults to ${bgYellow(
+		black(` ${JSON.stringify(value)} `)
+	)}\n`;
+}
+
+export function preferenceDisabled(name: string) {
+	return `${yellow('◯')} ${name} is now ${bgYellow(black(' disabled '))}\n`;
+}
+
+export function preferenceReset(name: string) {
+	return `${cyan('◆')} ${name} has been ${bgCyan(black(' reset '))}\n`;
 }
 
 export function telemetryDisabled() {
-	return `\n  ${yellow('◯')}  Anonymous telemetry is ${bgYellow(
-		black(' disabled ')
-	)}. We won't share any usage data.\n`;
+	return [
+		green('▶ Anonymous telemetry ') + bgGreen(' disabled '),
+		`  Astro is no longer collecting anonymous usage data.`,
+		``,
+	].join('\n');
 }
 
 export function telemetryReset() {
-	return `\n  ${cyan('◆')} Anonymous telemetry has been ${bgCyan(
-		black(' reset ')
-	)}. You may be prompted again.\n`;
+	return [green('▶ Anonymous telemetry preferences reset.'), ``].join('\n');
+}
+
+export function fsStrictWarning() {
+	const title = yellow('▶ ' + `${bold('vite.server.fs.strict')} has been disabled!`);
+	const subtitle = `  Files on your machine are likely accessible on your network.`;
+	return `${title}\n${subtitle}\n`;
 }
 
 export function prerelease({ currentVersion }: { currentVersion: string }) {
-	const tag = currentVersion.split('-').slice(1).join('-').replace(/\..*$/, '');
+	const tag = currentVersion.split('-').slice(1).join('-').replace(/\..*$/, '') || 'unknown';
 	const badge = bgYellow(black(` ${tag} `));
-	const headline = yellow(`▶ This is a ${badge} prerelease build`);
-	const warning = `  Feedback? ${underline('https://astro.build/issues')}`;
-	return [headline, warning, ''].map((msg) => `  ${msg}`).join('\n');
+	const title = yellow('▶ ' + `This is a ${badge} prerelease build!`);
+	const subtitle = `  Report issues here: ${cyan(underline('https://astro.build/issues'))}`;
+	return `${title}\n${subtitle}\n`;
 }
 
 export function success(message: string, tip?: string) {
@@ -183,11 +202,6 @@ export function cancelled(message: string, tip?: string) {
 		.join('\n');
 }
 
-/** Display port in use */
-export function portInUse({ port }: { port: number }): string {
-	return `Port ${port} in use. Trying a new one…`;
-}
-
 const LOCAL_IP_HOSTS = new Set(['localhost', '127.0.0.1']);
 
 export function getNetworkLogging(host: string | boolean): 'none' | 'host-to-expose' | 'visible' {
@@ -209,54 +223,109 @@ export function formatConfigErrorMessage(err: ZodError) {
 	)}`;
 }
 
-export function formatErrorMessage(_err: Error, args: string[] = []): string {
-	const err = collectErrorMetadata(_err);
-	args.push(`${bgRed(black(` error `))}${red(bold(padMultilineString(err.message)))}`);
-	if (err.id) {
-		args.push(`  ${bold('File:')}`);
-		args.push(red(`    ${err.id}`));
+// a regex to match the first line of a stack trace
+const STACK_LINE_REGEXP = /^\s+at /g;
+const IRRELEVANT_STACK_REGEXP = /node_modules|astro[/\\]dist/g;
+function formatErrorStackTrace(
+	err: Error | ErrorWithMetadata,
+	showFullStacktrace: boolean
+): string {
+	const stackLines = (err.stack || '').split('\n').filter((line) => STACK_LINE_REGEXP.test(line));
+	// If full details are required, just return the entire stack trace.
+	if (showFullStacktrace) {
+		return stackLines.join('\n');
 	}
-	if (err.frame) {
-		args.push(`  ${bold('Code:')}`);
-		args.push(red(padMultilineString(err.frame, 4)));
+	// Grab every string from the user's codebase, exit when you hit node_modules or astro/dist
+	const irrelevantStackIndex = stackLines.findIndex((line) => IRRELEVANT_STACK_REGEXP.test(line));
+	if (irrelevantStackIndex <= 0) {
+		const errorId = (err as ErrorWithMetadata).id;
+		const errorLoc = (err as ErrorWithMetadata).loc;
+		if (errorId || errorLoc?.file) {
+			const prettyLocation = `    at ${errorId ?? errorLoc?.file}${
+				errorLoc?.line && errorLoc.column ? `:${errorLoc.line}:${errorLoc.column}` : ''
+			}`;
+			return (
+				prettyLocation + '\n    [...] See full stack trace in the browser, or rerun with --verbose.'
+			);
+		} else {
+			return stackLines.join('\n');
+		}
 	}
-	if (args.length === 1 && err.stack) {
-		args.push(dim(cleanErrorStack(err.stack)));
-	} else if (err.stack) {
-		args.push(`  ${bold('Stacktrace:')}`);
-		args.push(dim(cleanErrorStack(err.stack)));
-		args.push(``);
+	// If the error occurred inside of a dependency, grab the entire stack.
+	// Otherwise, only grab the part of the stack that is relevant to the user's codebase.
+	return (
+		stackLines.splice(0, irrelevantStackIndex).join('\n') +
+		'\n    [...] See full stack trace in the browser, or rerun with --verbose.'
+	);
+}
+
+export function formatErrorMessage(err: ErrorWithMetadata, showFullStacktrace: boolean): string {
+	const isOurError = AstroError.is(err) || CompilerError.is(err) || AstroUserError.is(err);
+	let message = '';
+	if (isOurError) {
+		message += red(`[${err.name}]`) + ' ' + renderErrorMarkdown(err.message, 'cli');
+	} else {
+		message += err.message;
 	}
-	return args.join('\n');
+	const output = [message];
+
+	if (err.hint) {
+		output.push(`  ${bold('Hint:')}`);
+		output.push(yellow(padMultilineString(renderErrorMarkdown(err.hint, 'cli'), 4)));
+	}
+
+	const docsLink = getDocsForError(err);
+	if (docsLink) {
+		output.push(`  ${bold('Error reference:')}`);
+		output.push(`    ${cyan(underline(docsLink))}`);
+	}
+
+	if (err.stack) {
+		output.push(`  ${bold('Stack trace:')}`);
+		output.push(dim(formatErrorStackTrace(err, showFullStacktrace)));
+	}
+
+	if (err.cause) {
+		output.push(`  ${bold('Caused by:')}`);
+		let causeMessage = '  ';
+		if (err.cause instanceof Error) {
+			causeMessage +=
+				err.cause.message + '\n' + formatErrorStackTrace(err.cause, showFullStacktrace);
+		} else {
+			causeMessage += JSON.stringify(err.cause);
+		}
+		output.push(dim(causeMessage));
+	}
+
+	return output.join('\n');
 }
 
 export function printHelp({
 	commandName,
 	headline,
 	usage,
-	commands,
-	flags,
+	tables,
+	description,
 }: {
 	commandName: string;
 	headline?: string;
 	usage?: string;
-	commands?: [command: string, help: string][];
-	flags?: [flag: string, help: string][];
+	tables?: Record<string, [command: string, help: string][]>;
+	description?: string;
 }) {
 	const linebreak = () => '';
 	const title = (label: string) => `  ${bgWhite(black(` ${label} `))}`;
-	const table = (rows: [string, string][], opts: { padding: number; prefix: string }) => {
-		const split = rows.some((row) => {
-			const message = `${opts.prefix}${' '.repeat(opts.padding)}${row[1]}`;
-			return message.length > process.stdout.columns;
-		});
-
+	const table = (rows: [string, string][], { padding }: { padding: number }) => {
+		const split = process.stdout.columns < 60;
 		let raw = '';
 
 		for (const row of rows) {
-			raw += `${opts.prefix}${bold(`${row[0]}`.padStart(opts.padding - opts.prefix.length))}`;
-			if (split) raw += '\n    ';
-			raw += ' ' + dim(row[1]) + '\n';
+			if (split) {
+				raw += `    ${row[0]}\n    `;
+			} else {
+				raw += `${`${row[0]}`.padStart(padding)}`;
+			}
+			raw += '  ' + dim(row[1]) + '\n';
 		}
 
 		return raw.slice(0, -1); // remove latest \n
@@ -277,18 +346,21 @@ export function printHelp({
 		message.push(linebreak(), `  ${green(commandName)} ${bold(usage)}`);
 	}
 
-	if (commands) {
-		message.push(
-			linebreak(),
-			title('Commands'),
-			table(commands, { padding: 28, prefix: `  ${commandName || 'astro'} ` })
-		);
+	if (tables) {
+		function calculateTablePadding(rows: [string, string][]) {
+			return rows.reduce((val, [first]) => Math.max(val, first.length), 0) + 2;
+		}
+		const tableEntries = Object.entries(tables);
+		const padding = Math.max(...tableEntries.map(([, rows]) => calculateTablePadding(rows)));
+		for (const [tableTitle, tableRows] of tableEntries) {
+			message.push(linebreak(), title(tableTitle), table(tableRows, { padding }));
+		}
 	}
 
-	if (flags) {
-		message.push(linebreak(), title('Flags'), table(flags, { padding: 28, prefix: '  ' }));
+	if (description) {
+		message.push(linebreak(), `${description}`);
 	}
 
 	// eslint-disable-next-line no-console
-	console.log(message.join('\n'));
+	console.log(message.join('\n') + '\n');
 }

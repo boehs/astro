@@ -1,7 +1,8 @@
-import { expect } from 'chai';
+import assert from 'node:assert/strict';
+import { before, describe, it } from 'node:test';
 import { load as cheerioLoad } from 'cheerio';
-import { loadFixture } from './test-utils.js';
 import testAdapter from './test-adapter.js';
+import { loadFixture } from './test-utils.js';
 
 describe('Lit integration in SSR', () => {
 	/** @type {import('./test-utils').Fixture} */
@@ -10,9 +11,7 @@ describe('Lit integration in SSR', () => {
 	before(async () => {
 		fixture = await loadFixture({
 			root: './fixtures/lit-element/',
-			experimental: {
-				ssr: true,
-			},
+			output: 'server',
 			adapter: testAdapter(),
 		});
 		await fixture.build();
@@ -27,9 +26,8 @@ describe('Lit integration in SSR', () => {
 	}
 
 	it('Is able to load', async () => {
-		delete globalThis.window;
 		const html = await fetchHTML('/');
 		const $ = cheerioLoad(html);
-		expect($('#win').text()).to.equal('function');
+		assert.equal($('#str').text(), 'initialized');
 	});
 });

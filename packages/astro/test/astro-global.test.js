@@ -1,8 +1,89 @@
-import { expect } from 'chai';
+import assert from 'node:assert/strict';
+import { after, before, describe, it } from 'node:test';
 import * as cheerio from 'cheerio';
 import { loadFixture } from './test-utils.js';
 
-describe('Astro.*', () => {
+describe('Astro Global', () => {
+	let fixture;
+
+	before(async () => {
+		fixture = await loadFixture({
+			root: './fixtures/astro-global/',
+			site: 'https://mysite.dev/blog/',
+			base: '/blog',
+		});
+	});
+
+	describe('dev', () => {
+		let devServer;
+
+		before(async () => {
+			devServer = await fixture.startDevServer();
+		});
+
+		after(async () => {
+			await devServer.stop();
+		});
+
+		it('Astro.request.url', async () => {
+			const res = await await fixture.fetch('/blog/?foo=42');
+			assert.equal(res.status, 200);
+
+			const html = await res.text();
+			const $ = cheerio.load(html);
+			assert.equal($('#pathname').text(), '/blog/');
+			assert.equal($('#searchparams').text(), '{}');
+			assert.equal($('#child-pathname').text(), '/blog/');
+			assert.equal($('#nested-child-pathname').text(), '/blog/');
+		});
+
+		it('Astro.glob() returned `url` metadata of each markdown file extensions DOES NOT include the extension', async () => {
+			const html = await fixture.fetch('/blog/omit-markdown-extensions/').then((res) => res.text());
+			const $ = cheerio.load(html);
+			assert.equal(
+				$('[data-any-url-contains-extension]').data('any-url-contains-extension'),
+				false
+			);
+		});
+	});
+
+	describe('build', () => {
+		before(async () => {
+			await fixture.build();
+		});
+
+		it('Astro.request.url', async () => {
+			const html = await fixture.readFile('/index.html');
+			const $ = cheerio.load(html);
+
+			assert.equal($('#pathname').text(), '/blog');
+			assert.equal($('#searchparams').text(), '{}');
+			assert.equal($('#child-pathname').text(), '/blog');
+			assert.equal($('#nested-child-pathname').text(), '/blog');
+		});
+
+		it('Astro.site', async () => {
+			const html = await fixture.readFile('/index.html');
+			const $ = cheerio.load(html);
+			assert.equal($('#site').attr('href'), 'https://mysite.dev/blog/');
+		});
+
+		it('Astro.glob() correctly returns an array of all posts', async () => {
+			const html = await fixture.readFile('/posts/1/index.html');
+			const $ = cheerio.load(html);
+			assert.equal($('.post-url').attr('href'), '/blog/post/post-2');
+		});
+
+		it('Astro.glob() correctly returns meta info for MD and Astro files', async () => {
+			const html = await fixture.readFile('/glob/index.html');
+			const $ = cheerio.load(html);
+			assert.equal($('[data-file]').length, 8);
+			assert.equal($('.post-url[href]').length, 8);
+		});
+	});
+});
+
+describe('Astro Global Defaults', () => {
 	let fixture;
 
 	before(async () => {
@@ -26,10 +107,10 @@ describe('Astro.*', () => {
 		});
 
 		it('Astro.request.url', async () => {
-			expect($('#pathname').text()).to.equal('/blog/');
-			expect($('#searchparams').text()).to.equal('{}');
-			expect($('#child-pathname').text()).to.equal('/blog/');
-			expect($('#nested-child-pathname').text()).to.equal('/blog/');
+			assert.equal($('#pathname').text(), '');
+			assert.equal($('#searchparams').text(), '');
+			assert.equal($('#child-pathname').text(), '');
+			assert.equal($('#nested-child-pathname').text(), '');
 		});
 	});
 
@@ -42,39 +123,16 @@ describe('Astro.*', () => {
 			const html = await fixture.readFile('/index.html');
 			const $ = cheerio.load(html);
 
-			expect($('#pathname').text()).to.equal('/blog/');
-			expect($('#searchparams').text()).to.equal('{}');
-			expect($('#child-pathname').text()).to.equal('/blog/');
-			expect($('#nested-child-pathname').text()).to.equal('/blog/');
-		});
-
-		it('Astro.canonicalURL', async () => {
-			// given a URL, expect the following canonical URL
-			const canonicalURLs = {
-				'/index.html': 'https://mysite.dev/blog/',
-				'/post/post/index.html': 'https://mysite.dev/blog/post/post/',
-				'/posts/1/index.html': 'https://mysite.dev/blog/posts/',
-				'/posts/2/index.html': 'https://mysite.dev/blog/posts/2/',
-			};
-
-			for (const [url, canonicalURL] of Object.entries(canonicalURLs)) {
-				const html = await fixture.readFile(url);
-
-				const $ = cheerio.load(html);
-				expect($('link[rel="canonical"]').attr('href')).to.equal(canonicalURL);
-			}
+			assert.equal($('#pathname').text(), '/');
+			assert.equal($('#searchparams').text(), '{}');
+			assert.equal($('#child-pathname').text(), '/');
+			assert.equal($('#nested-child-pathname').text(), '/');
 		});
 
 		it('Astro.site', async () => {
 			const html = await fixture.readFile('/index.html');
 			const $ = cheerio.load(html);
-			expect($('#site').attr('href')).to.equal('https://mysite.dev/blog/');
-		});
-
-		it('Astro.glob() correctly returns an array of all posts', async () => {
-			const html = await fixture.readFile('/posts/1/index.html');
-			const $ = cheerio.load(html);
-			expect($('.post-url').attr('href')).to.equal('/blog/post/post-2');
+			assert.equal($('#site').attr('href'), undefined);
 		});
 	});
 });

@@ -1,56 +1,61 @@
-import type { AstroIntegration, AstroRenderer } from 'astro';
+import type { AstroConfig, AstroIntegration, AstroRenderer } from 'astro';
+import solid, { type Options as ViteSolidPluginOptions } from 'vite-plugin-solid';
 
-function getRenderer(): AstroRenderer {
-	return {
-		name: '@astrojs/solid-js',
-		clientEntrypoint: '@astrojs/solid-js/client.js',
-		serverEntrypoint: '@astrojs/solid-js/server.js',
-		jsxImportSource: 'solid-js',
-		jsxTransformOptions: async ({ ssr }) => {
-			// @ts-expect-error types not found
-			const [{ default: solid }] = await Promise.all([import('babel-preset-solid')]);
-			const options = {
-				presets: [solid({}, { generate: ssr ? 'ssr' : 'dom', hydratable: true })],
-				plugins: [],
-			};
-
-			return options;
-		},
-	};
-}
-
-function getViteConfiguration(isDev: boolean) {
+async function getViteConfiguration(isDev: boolean, { include, exclude }: Options = {}) {
 	// https://github.com/solidjs/vite-plugin-solid
-	// We inject the dev mode only if the user explicitely wants it or if we are in dev (serve) mode
+	// We inject the dev mode only if the user explicitly wants it or if we are in dev (serve) mode
 	const nestedDeps = ['solid-js', 'solid-js/web', 'solid-js/store', 'solid-js/html', 'solid-js/h'];
 	return {
-		/**
-		 * We only need esbuild on .ts or .js files.
-		 * .tsx & .jsx files are handled by us
-		 */
-		esbuild: { include: /\.ts$/ },
 		resolve: {
 			conditions: ['solid', ...(isDev ? ['development'] : [])],
 			dedupe: nestedDeps,
 			alias: [{ find: /^solid-refresh$/, replacement: '/@solid-refresh' }],
 		},
 		optimizeDeps: {
-			include: nestedDeps,
+			include: [...nestedDeps],
 			exclude: ['@astrojs/solid-js/server.js'],
 		},
+		plugins: [
+			solid({ include, exclude, dev: isDev, ssr: true }),
+			{
+				name: '@astrojs/solid:config-overrides',
+				enforce: 'post',
+				config() {
+					return {
+						esbuild: {
+							// To support using alongside other JSX frameworks, still let
+							// esbuild compile stuff. Solid goes first anyways.
+							include: /\.(m?ts|[jt]sx)$/,
+						},
+					};
+				},
+			},
+		],
 		ssr: {
 			external: ['babel-preset-solid'],
 		},
+	} satisfies AstroConfig['vite'];
+}
+
+function getRenderer(): AstroRenderer {
+	return {
+		name: '@astrojs/solid-js',
+		clientEntrypoint: '@astrojs/solid-js/client.js',
+		serverEntrypoint: '@astrojs/solid-js/server.js',
 	};
 }
 
-export default function (): AstroIntegration {
+export type Options = Pick<ViteSolidPluginOptions, 'include' | 'exclude'>;
+
+export default function (opts: Options = {}): AstroIntegration {
 	return {
 		name: '@astrojs/solid-js',
 		hooks: {
-			'astro:config:setup': ({ command, addRenderer, updateConfig }) => {
+			'astro:config:setup': async ({ command, addRenderer, updateConfig }) => {
 				addRenderer(getRenderer());
-				updateConfig({ vite: getViteConfiguration(command === 'dev') });
+				updateConfig({
+					vite: await getViteConfiguration(command === 'dev', opts),
+				});
 			},
 		},
 	};

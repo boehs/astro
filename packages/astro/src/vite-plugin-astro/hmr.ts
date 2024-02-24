@@ -1,98 +1,97 @@
-import type { AstroConfig } from '../@types/astro';
-import type { LogOptions } from '../core/logger/core.js';
-import type { ViteDevServer, ModuleNode, HmrContext } from 'vite';
-import type { PluginContext as RollupPluginContext, ResolvedId } from 'rollup';
-import { invalidateCompilation, isCached } from './compile.js';
-import { info } from '../core/logger/core.js';
-import * as msg from '../core/messages.js';
+import type { HmrContext } from 'vite';
+import type { Logger } from '../core/logger/core.js';
+import { frontmatterRE } from './utils.js';
+import type { CompileMetadata } from './types.js';
 
-interface TrackCSSDependenciesOptions {
-	viteDevServer: ViteDevServer | null;
-	filename: string;
-	id: string;
-	deps: Set<string>;
+export interface HandleHotUpdateOptions {
+	logger: Logger;
+	astroFileToCompileMetadata: Map<string, CompileMetadata>;
 }
 
-export async function trackCSSDependencies(
-	this: RollupPluginContext,
-	opts: TrackCSSDependenciesOptions
-): Promise<void> {
-	const { viteDevServer, filename, deps, id } = opts;
-	// Dev, register CSS dependencies for HMR.
-	if (viteDevServer) {
-		const mod = viteDevServer.moduleGraph.getModuleById(id);
-		if (mod) {
-			const cssDeps = (
-				await Promise.all(
-					Array.from(deps).map((spec) => {
-						return this.resolve(spec, id);
-					})
-				)
-			)
-				.filter(Boolean)
-				.map((dep) => (dep as ResolvedId).id);
-
-			const { moduleGraph } = viteDevServer;
-			// record deps in the module graph so edits to @import css can trigger
-			// main import to hot update
-			const depModules = new Set(mod.importedModules);
-			for (const dep of cssDeps) {
-				depModules.add(moduleGraph.createFileOnlyEntry(dep));
-			}
-
-			// Update the module graph, telling it about our CSS deps.
-			moduleGraph.updateModuleInfo(mod, depModules, new Set(), true);
-			for (const dep of cssDeps) {
-				this.addWatchFile(dep);
-			}
+export async function handleHotUpdate(
+	ctx: HmrContext,
+	{ logger, astroFileToCompileMetadata }: HandleHotUpdateOptions
+) {
+	// HANDLING 1: Invalidate compile metadata if CSS dependency updated
+	//
+	// If any `ctx.file` is part of a CSS dependency of any Astro file, invalidate its `astroFileToCompileMetadata`
+	// so the next transform of the Astro file or Astro script/style virtual module will re-generate it
+	for (const [astroFile, compileData] of astroFileToCompileMetadata) {
+		const isUpdatedFileCssDep = compileData.css.some((css) => css.dependencies?.includes(ctx.file));
+		if (isUpdatedFileCssDep) {
+			astroFileToCompileMetadata.delete(astroFile);
 		}
+	}
+
+	// HANDLING 2: Only invalidate Astro style virtual module if only style tags changed
+	//
+	// If only the style code has changed, e.g. editing the `color`, then we can directly invalidate
+	// the Astro CSS virtual modules only. The main Astro module's JS result will be the same and doesn't
+	// need to be invalidated.
+	const oldCode = astroFileToCompileMetadata.get(ctx.file)?.originalCode;
+	if (oldCode == null) return;
+	const newCode = await ctx.read();
+
+	if (isStyleOnlyChanged(oldCode, newCode)) {
+		logger.debug('watch', 'style-only change');
+		// Invalidate its `astroFileToCompileMetadata` so that the next transform of Astro style virtual module
+		// will re-generate it
+		astroFileToCompileMetadata.delete(ctx.file);
+		// Only return the Astro styles that have changed!
+		return ctx.modules.filter((mod) => mod.id?.includes('astro&type=style'));
 	}
 }
 
-export async function handleHotUpdate(ctx: HmrContext, config: AstroConfig, logging: LogOptions) {
-	// Invalidate the compilation cache so it recompiles
-	invalidateCompilation(config, ctx.file);
+// Disable eslint as we're not sure how to improve this regex yet
+// eslint-disable-next-line regexp/no-super-linear-backtracking
+const scriptRE = /<script(?:\s.*?)?>.*?<\/script>/gs;
+// eslint-disable-next-line regexp/no-super-linear-backtracking
+const styleRE = /<style(?:\s.*?)?>.*?<\/style>/gs;
 
-	// go through each of these modules importers and invalidate any .astro compilation
-	// that needs to be rerun.
-	const filtered = new Set<ModuleNode>(ctx.modules);
-	const files = new Set<string>();
-	for (const mod of ctx.modules) {
-		// This is always the HMR script, we skip it to avoid spamming
-		// the browser console with HMR updates about this file
-		if (mod.id?.endsWith('.astro?html-proxy&index=0.js')) {
-			filtered.delete(mod);
-			continue;
-		}
-		if (mod.file && isCached(config, mod.file)) {
-			filtered.add(mod);
-			files.add(mod.file);
-		}
-		for (const imp of mod.importers) {
-			if (imp.file && isCached(config, imp.file)) {
-				filtered.add(imp);
-				files.add(imp.file);
-			}
+export function isStyleOnlyChanged(oldCode: string, newCode: string) {
+	if (oldCode === newCode) return false;
+
+	// Before we can regex-capture style tags, we remove the frontmatter and scripts
+	// first as they could contain false-positive style tag matches. At the same time,
+	// we can also compare if they have changed and early out.
+
+	// Strip off and compare frontmatter
+	let oldFrontmatter = '';
+	let newFrontmatter = '';
+	oldCode = oldCode.replace(frontmatterRE, (m) => ((oldFrontmatter = m), ''));
+	newCode = newCode.replace(frontmatterRE, (m) => ((newFrontmatter = m), ''));
+	if (oldFrontmatter !== newFrontmatter) return false;
+
+	// Strip off and compare scripts
+	const oldScripts: string[] = [];
+	const newScripts: string[] = [];
+	oldCode = oldCode.replace(scriptRE, (m) => (oldScripts.push(m), ''));
+	newCode = newCode.replace(scriptRE, (m) => (newScripts.push(m), ''));
+	if (!isArrayEqual(oldScripts, newScripts)) return false;
+
+	// Finally, we can compare styles
+	const oldStyles: string[] = [];
+	const newStyles: string[] = [];
+	oldCode = oldCode.replace(styleRE, (m) => (oldStyles.push(m), ''));
+	newCode = newCode.replace(styleRE, (m) => (newStyles.push(m), ''));
+
+	// Remaining of `oldCode` and `newCode` is the markup, return false if they're different
+	if (oldCode !== newCode) return false;
+
+	// Finally, check if only the style changed.
+	// The length must also be the same for style only change. If style tags are added/removed,
+	// we need to regenerate the main Astro file so that its CSS imports are also added/removed
+	return oldStyles.length === newStyles.length && !isArrayEqual(oldStyles, newStyles);
+}
+
+function isArrayEqual(a: any[], b: any[]) {
+	if (a.length !== b.length) {
+		return false;
+	}
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) {
+			return false;
 		}
 	}
-
-	// Invalidate happens as a separate step because a single .astro file
-	// produces multiple CSS modules and we want to return all of those.
-	for (const file of files) {
-		invalidateCompilation(config, file);
-	}
-
-	// Bugfix: sometimes style URLs get normalized and end with `lang.css=`
-	// These will cause full reloads, so filter them out here
-	const mods = ctx.modules.filter((m) => !m.url.endsWith('='));
-	const isSelfAccepting = mods.every((m) => m.isSelfAccepting || m.url.endsWith('.svelte'));
-
-	const file = ctx.file.replace(config.root.pathname, '/');
-	if (isSelfAccepting) {
-		info(logging, 'astro', msg.hmr({ file }));
-	} else {
-		info(logging, 'astro', msg.reload({ file }));
-	}
-
-	return mods;
+	return true;
 }

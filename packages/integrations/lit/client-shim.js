@@ -2,15 +2,21 @@ async function polyfill() {
 	const { hydrateShadowRoots } = await import(
 		'@webcomponents/template-shadowroot/template-shadowroot.js'
 	);
-	hydrateShadowRoots(document.body);
+	window.addEventListener('DOMContentLoaded', () => hydrateShadowRoots(document.body), {
+		once: true,
+	});
 }
 
 const polyfillCheckEl = new DOMParser()
-	.parseFromString(`<p><template shadowroot="open"></template></p>`, 'text/html', {
-		includeShadowRoots: true,
-	})
+	.parseFromString(
+		`<p><template shadowroot="open" shadowrootmode="open"></template></p>`,
+		'text/html',
+		{
+			includeShadowRoots: true,
+		}
+	)
 	.querySelector('p');
 
-if (!polyfillCheckEl || !polyfillCheckEl.shadowRoot) {
+if (!polyfillCheckEl?.shadowRoot) {
 	polyfill();
 }

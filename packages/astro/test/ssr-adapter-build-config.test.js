@@ -1,24 +1,25 @@
-import { expect } from 'chai';
-import { load as cheerioLoad } from 'cheerio';
-import { loadFixture } from './test-utils.js';
+import assert from 'node:assert/strict';
+import { before, describe, it } from 'node:test';
 import { viteID } from '../dist/core/util.js';
+import { loadFixture } from './test-utils.js';
 
 describe('Integration buildConfig hook', () => {
 	/** @type {import('./test-utils').Fixture} */
 	let fixture;
 
 	before(async () => {
-		let _config;
 		fixture = await loadFixture({
 			root: './fixtures/ssr-request/',
-			experimental: {
-				ssr: true,
-			},
+			output: 'server',
 			adapter: {
 				name: 'my-ssr-adapter',
 				hooks: {
-					'astro:config:setup': ({ updateConfig }) => {
+					'astro:config:setup': ({ config, updateConfig }) => {
 						updateConfig({
+							build: {
+								server: new URL('./dist/.root/server/', config.root),
+								client: new URL('./dist/.root/client/', config.root),
+							},
 							vite: {
 								plugins: [
 									{
@@ -26,8 +27,10 @@ describe('Integration buildConfig hook', () => {
 											if (id === '@my-ssr') {
 												return id;
 											} else if (id === 'astro/app') {
-												const id = viteID(new URL('../dist/core/app/index.js', import.meta.url));
-												return id;
+												const viteId = viteID(
+													new URL('../dist/core/app/index.js', import.meta.url)
+												);
+												return viteId;
 											}
 										},
 										load(id) {
@@ -40,16 +43,12 @@ describe('Integration buildConfig hook', () => {
 							},
 						});
 					},
-					'astro:build:start': ({ buildConfig }) => {
-						buildConfig.server = new URL('./dist/.root/server/', _config.root);
-						buildConfig.client = new URL('./dist/.root/client/', _config.root);
-					},
-					'astro:config:done': ({ config, setAdapter }) => {
-						_config = config;
+					'astro:config:done': ({ setAdapter }) => {
 						setAdapter({
 							name: 'my-ssr-adapter',
 							serverEntrypoint: '@my-ssr',
 							exports: ['manifest', 'createApp'],
+							supportedAstroFeatures: {},
 						});
 					},
 				},
@@ -60,11 +59,11 @@ describe('Integration buildConfig hook', () => {
 
 	it('Puts client files in the client folder', async () => {
 		let data = await fixture.readFile('/.root/client/cars.json');
-		expect(data).to.not.be.undefined;
+		assert.notEqual(data, undefined);
 	});
 
 	it('Puts the server entry into the server folder', async () => {
 		let data = await fixture.readFile('/.root/server/entry.mjs');
-		expect(data).to.not.be.undefined;
+		assert.notEqual(data, undefined);
 	});
 });

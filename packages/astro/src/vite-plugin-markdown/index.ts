@@ -1,181 +1,163 @@
-import { renderMarkdown } from '@astrojs/markdown-remark';
-import { transform } from '@astrojs/compiler';
-import ancestor from 'common-ancestor-path';
-import esbuild from 'esbuild';
-import fs from 'fs';
-import matter from 'gray-matter';
-import { fileURLToPath } from 'url';
+import {
+	createMarkdownProcessor,
+	InvalidAstroDataError,
+	type MarkdownProcessor,
+} from '@astrojs/markdown-remark';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Plugin } from 'vite';
-import type { AstroConfig } from '../@types/astro';
-import { PAGE_SSR_SCRIPT_ID } from '../vite-plugin-scripts/index.js';
-import { pagesVirtualModuleId } from '../core/app/index.js';
-import { appendForwardSlash } from '../core/path.js';
-import { resolvePages } from '../core/util.js';
+import { normalizePath } from 'vite';
+import type { AstroSettings } from '../@types/astro.js';
+import { AstroError, AstroErrorData } from '../core/errors/index.js';
+import { safeParseFrontmatter } from '../content/utils.js';
+import type { Logger } from '../core/logger/core.js';
+import { isMarkdownFile } from '../core/util.js';
+import { shorthash } from '../runtime/server/shorthash.js';
+import type { PluginMetadata } from '../vite-plugin-astro/types.js';
+import { getFileInfo } from '../vite-plugin-utils/index.js';
+import { getMarkdownCodeForImages, type MarkdownImagePath } from './images.js';
 
 interface AstroPluginOptions {
-	config: AstroConfig;
+	settings: AstroSettings;
+	logger: Logger;
 }
 
-const MARKDOWN_IMPORT_FLAG = '?mdImport';
-const MARKDOWN_CONTENT_FLAG = '?content';
+const astroServerRuntimeModulePath = normalizePath(
+	fileURLToPath(new URL('../runtime/server/index.js', import.meta.url))
+);
 
-// TODO: Clean up some of the shared logic between this Markdown plugin and the Astro plugin.
-// Both end up connecting a `load()` hook to the Astro compiler, and share some copy-paste
-// logic in how that is done.
-export default function markdown({ config }: AstroPluginOptions): Plugin {
-	function normalizeFilename(filename: string) {
-		if (filename.startsWith('/@fs')) {
-			filename = filename.slice('/@fs'.length);
-		} else if (filename.startsWith('/') && !ancestor(filename, config.root.pathname)) {
-			filename = new URL('.' + filename, config.root).pathname;
-		}
-		return filename;
-	}
+const astroErrorModulePath = normalizePath(
+	fileURLToPath(new URL('../core/errors/index.js', import.meta.url))
+);
 
-	// Weird Vite behavior: Vite seems to use a fake "index.html" importer when you
-	// have `enforce: pre`. This can probably be removed once the vite issue is fixed.
-	// see: https://github.com/vitejs/vite/issues/5981
-	const fakeRootImporter = fileURLToPath(new URL('index.html', config.root));
-	function isRootImport(importer: string | undefined) {
-		if (!importer) {
-			return true;
-		}
-		if (importer === fakeRootImporter) {
-			return true;
-		}
-		if (importer === '\0' + pagesVirtualModuleId) {
-			return true;
-		}
-		return false;
-	}
+export default function markdown({ settings, logger }: AstroPluginOptions): Plugin {
+	let processor: MarkdownProcessor;
 
 	return {
-		name: 'astro:markdown',
 		enforce: 'pre',
-		async resolveId(id, importer, options) {
-			// Resolve any .md files with the `?content` cache buster. This should only come from
-			// an already-resolved JS module wrapper. Needed to prevent infinite loops in Vite.
-			// Unclear if this is expected or if cache busting is just working around a Vite bug.
-			if (id.endsWith(`.md${MARKDOWN_CONTENT_FLAG}`)) {
-				const resolvedId = await this.resolve(id, importer, { skipSelf: true, ...options });
-				return resolvedId?.id.replace(MARKDOWN_CONTENT_FLAG, '');
-			}
-			// If the markdown file is imported from another file via ESM, resolve a JS representation
-			// that defers the markdown -> HTML rendering until it is needed. This is especially useful
-			// when fetching and then filtering many markdown files, like with import.meta.glob() or Astro.glob().
-			// Otherwise, resolve directly to the actual component.
-			if (id.endsWith('.md') && !isRootImport(importer)) {
-				const resolvedId = await this.resolve(id, importer, { skipSelf: true, ...options });
-				if (resolvedId) {
-					return resolvedId.id + MARKDOWN_IMPORT_FLAG;
-				}
-			}
-			// In all other cases, we do nothing and rely on normal Vite resolution.
-			return undefined;
+		name: 'astro:markdown',
+		async buildStart() {
+			processor = await createMarkdownProcessor(settings.config.markdown);
 		},
+		// Why not the "transform" hook instead of "load" + readFile?
+		// A: Vite transforms all "import.meta.env" references to their values before
+		// passing to the transform hook. This lets us get the truly raw value
+		// to escape "import.meta.env" ourselves.
 		async load(id) {
-			// A markdown file has been imported via ESM!
-			// Return the file's JS representation, including all Markdown
-			// frontmatter and a deferred `import() of the compiled markdown content.
-			if (id.endsWith(`.md${MARKDOWN_IMPORT_FLAG}`)) {
-				const sitePathname = appendForwardSlash(
-					config.site ? new URL(config.base, config.site).pathname : config.base
-				);
+			if (isMarkdownFile(id)) {
+				const { fileId, fileUrl } = getFileInfo(id, settings.config);
+				const rawFile = await fs.promises.readFile(fileId, 'utf-8');
+				const raw = safeParseFrontmatter(rawFile, id);
 
-				const fileId = id.replace(MARKDOWN_IMPORT_FLAG, '');
-				let fileUrl = fileId.includes('/pages/')
-					? fileId.replace(/^.*?\/pages\//, sitePathname).replace(/(\/index)?\.md$/, '')
-					: undefined;
-				if (fileUrl && config.trailingSlash === 'always') {
-					fileUrl = appendForwardSlash(fileUrl);
-				}
+				const fileURL = pathToFileURL(fileId);
 
-				const source = await fs.promises.readFile(fileId, 'utf8');
-				const { data: frontmatter } = matter(source);
-				return {
-					code: `   
-						// Static
-						export const frontmatter = ${JSON.stringify(frontmatter)};
-						export const file = ${JSON.stringify(fileId)};
-						export const url = ${JSON.stringify(fileUrl)};
-						
-						// Deferred
-						export default async function load() {
-							return (await import(${JSON.stringify(fileId + MARKDOWN_CONTENT_FLAG)}));
-						};
-						export function Content(...args) {
-							return load().then((m) => m.default(...args))
+				const renderResult = await processor
+					.render(raw.content, {
+						// @ts-expect-error passing internal prop
+						fileURL,
+						frontmatter: raw.data,
+					})
+					.catch((err) => {
+						// Improve error message for invalid astro data
+						if (err instanceof InvalidAstroDataError) {
+							throw new AstroError(AstroErrorData.InvalidFrontmatterInjectionError);
 						}
-						Content.isAstroComponentFactory = true;
-						export function getHeaders() {
-							return load().then((m) => m.metadata.headers)
-						};`,
-					map: null,
-				};
-			}
+						throw err;
+					});
 
-			// A markdown file is being rendered! This markdown file was either imported
-			// directly as a page in Vite, or it was a deferred render from a JS module.
-			// This returns the compiled markdown -> astro component that renders to HTML.
-			if (id.endsWith('.md')) {
-				const source = await fs.promises.readFile(id, 'utf8');
-				const renderOpts = config.markdown;
+				let html = renderResult.code;
+				const { headings, imagePaths: rawImagePaths, frontmatter } = renderResult.metadata;
 
-				const filename = normalizeFilename(id);
-				const fileUrl = new URL(`file://${filename}`);
-				const isPage = fileUrl.pathname.startsWith(resolvePages(config).pathname);
-				const hasInjectedScript = isPage && config._ctx.scripts.some((s) => s.stage === 'page-ssr');
-
-				// Extract special frontmatter keys
-				const { data: frontmatter, content: markdownContent } = matter(source);
-				let renderResult = await renderMarkdown(markdownContent, renderOpts);
-				let { code: astroResult, metadata } = renderResult;
-				const { layout = '', components = '', setup = '', ...content } = frontmatter;
-				content.astro = metadata;
-				const prelude = `---
-${layout ? `import Layout from '${layout}';` : ''}
-${components ? `import * from '${components}';` : ''}
-${hasInjectedScript ? `import '${PAGE_SSR_SCRIPT_ID}';` : ''}
-${setup}
-
-const $$content = ${JSON.stringify(content)}
----`;
-				const imports = `${layout ? `import Layout from '${layout}';` : ''}
-${setup}`.trim();
-				// If the user imported "Layout", wrap the content in a Layout
-				if (/\bLayout\b/.test(imports)) {
-					astroResult = `${prelude}\n<Layout content={$$content}>\n\n${astroResult}\n\n</Layout>`;
-				} else {
-					astroResult = `${prelude}\n${astroResult}`;
+				// Resolve all the extracted images from the content
+				const imagePaths: MarkdownImagePath[] = [];
+				for (const imagePath of rawImagePaths.values()) {
+					imagePaths.push({
+						raw: imagePath,
+						resolved:
+							(await this.resolve(imagePath, id))?.id ?? path.join(path.dirname(id), imagePath),
+						safeName: shorthash(imagePath),
+					});
 				}
 
-				// Transform from `.astro` to valid `.ts`
-				let { code: tsResult } = await transform(astroResult, {
-					pathname: fileUrl.pathname.slice(config.root.pathname.length - 1),
-					projectRoot: config.root.toString(),
-					site: config.site ? new URL(config.base, config.site).toString() : undefined,
-					sourcefile: id,
-					sourcemap: 'inline',
-					internalURL: `/@fs${new URL('../runtime/server/index.js', import.meta.url).pathname}`,
-				});
+				const { layout } = frontmatter;
 
-				tsResult = `\nexport const metadata = ${JSON.stringify(metadata)};
-export const frontmatter = ${JSON.stringify(content)};
-${tsResult}`;
+				if (frontmatter.setup) {
+					logger.warn(
+						'markdown',
+						`[${id}] Astro now supports MDX! Support for components in ".md" (or alternative extensions like ".markdown") files using the "setup" frontmatter is no longer enabled by default. Migrate this file to MDX.`
+					);
+				}
 
-				// Compile from `.ts` to `.js`
-				const { code } = await esbuild.transform(tsResult, {
-					loader: 'ts',
-					sourcemap: false,
-					sourcefile: id,
+				const code = `
+				import { unescapeHTML, spreadAttributes, createComponent, render, renderComponent, maybeRenderHead } from ${JSON.stringify(
+					astroServerRuntimeModulePath
+				)};
+				import { AstroError, AstroErrorData } from ${JSON.stringify(astroErrorModulePath)};
+				${layout ? `import Layout from ${JSON.stringify(layout)};` : ''}
+
+				${
+					// Only include the code relevant to `astro:assets` if there's images in the file
+					imagePaths.length > 0
+						? getMarkdownCodeForImages(imagePaths, html)
+						: `const html = ${JSON.stringify(html)};`
+				}
+
+				export const frontmatter = ${JSON.stringify(frontmatter)};
+				export const file = ${JSON.stringify(fileId)};
+				export const url = ${JSON.stringify(fileUrl)};
+				export function rawContent() {
+					return ${JSON.stringify(raw.content)};
+				}
+				export function compiledContent() {
+					return html;
+				}
+				export function getHeadings() {
+					return ${JSON.stringify(headings)};
+				}
+
+				export const Content = createComponent((result, _props, slots) => {
+					const { layout, ...content } = frontmatter;
+					content.file = file;
+					content.url = url;
+
+					return ${
+						layout
+							? `render\`\${renderComponent(result, 'Layout', Layout, {
+								file,
+								url,
+								content,
+								frontmatter: content,
+								headings: getHeadings(),
+								rawContent,
+								compiledContent,
+								'server:root': true,
+							}, {
+								'default': () => render\`\${unescapeHTML(html)}\`
+							})}\`;`
+							: `render\`\${maybeRenderHead(result)}\${unescapeHTML(html)}\`;`
+					}
 				});
+				export default Content;
+				`;
+
 				return {
 					code,
-					map: null,
+					meta: {
+						astro: {
+							hydratedComponents: [],
+							clientOnlyComponents: [],
+							scripts: [],
+							propagation: 'none',
+							containsHead: false,
+							pageOptions: {},
+						} as PluginMetadata['astro'],
+						vite: {
+							lang: 'ts',
+						},
+					},
 				};
 			}
-
-			return null;
 		},
 	};
 }

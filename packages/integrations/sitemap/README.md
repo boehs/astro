@@ -1,115 +1,38 @@
 # @astrojs/sitemap 🗺
 
-This **[Astro integration][astro-integration]** generates a sitemap for your Astro project.
+This **[Astro integration][astro-integration]** generates a sitemap based on your pages when you build your Astro project.
 
-Sitemaps outline all of the pages, videos, and files on your site. Search engines like Google read this file to crawl your site more efficiently. [See Google's own advice on sitemaps](https://developers.google.com/search/docs/advanced/sitemaps/overview) to learn more.
+## Documentation
 
-## Installation
+Read the [`@astrojs/sitemap` docs][docs]
 
-There are two ways to add integrations to your project. Let's try the most convenient option first!
+## Support
 
-### (experimental) `astro add` command
+- Get help in the [Astro Discord][discord]. Post questions in our `#support` forum, or visit our dedicated `#dev` channel to discuss current development and more!
 
-Astro includes a CLI tool for adding first party integrations: `astro add`. This command will:
-1. (Optionally) Install all necessary dependencies and peer dependencies
-2. (Also optionally) Update your `astro.config.*` file to apply this integration
+- Check our [Astro Integration Documentation][astro-integration] for more on integrations.
 
-To install `@astrojs/sitemap`, run the following from your project directory and follow the prompts:
+- Submit bug reports and feature requests as [GitHub issues][issues].
 
-```sh
-# Using NPM
-npx astro add sitemap
-# Using Yarn
-yarn astro add sitemap
-# Using PNPM
-pnpx astro add sitemap
-```
+## Contributing
 
-If you run into any hiccups, [feel free to log an issue on our GitHub](https://github.com/withastro/astro/issues) and try the manual installation steps below.
+This package is maintained by Astro's Core team. You're welcome to submit an issue or PR! These links will help you get started:
 
-### Install dependencies manually
+- [Contributor Manual][contributing]
+- [Code of Conduct][coc]
+- [Community Guide][community]
 
-First, install the `@astrojs/sitemap` integration like so:
+## License
 
-```
-npm install @astrojs/sitemap
-```
+MIT
 
-Then, apply this integration to your `astro.config.*` file using the `integrations` property:
+Copyright (c) 2023–present [Astro][astro]
 
-__astro.config.mjs__
-
-```js
-import sitemap from '@astrojs/sitemap';
-
-export default {
-  // ...
-  integrations: [sitemap()],
-}
-```
-
-## Getting started
-
-`@astrojs/sitemap` requires a deployment / site URL for generation. Add your site's URL under your `astro.config.*` using the `site` property:
-
-__astro.config.mjs__
-
-```js
-import sitemap from '@astrojs/sitemap';
-
-export default {
-  // ...
-  site: 'https://stargazers.club',
-  integrations: [sitemap()],
-}
-```
-
-Now, [build your site for production](https://docs.astro.build/en/reference/cli-reference/#astro-build) via the `astro build` command. You should find your sitemap under `dist/sitemap.xml`!
-
-You can also check our [Astro Integration Documentation][astro-integration] for more on integrations.
-
-## Configuration
-
-### filter
-
-All pages are included in your sitemap by default. By adding a custom `filter`, you can filter included pages by URL.
-
-__astro.config.mjs__
-
-```js
-import sitemap from '@astrojs/sitemap';
-
-export default {
-  site: 'https://stargazers.club',
-  integrations: [
-    sitemap({
-      filter: (page) => page !== 'https://stargazers.club/secret-vip-lounge'
-    }),
-  ],
-}
-```
-
-The `page` function parameter is the full URL of your rendered page, including your `site` domain. Return `true` to include a page in your sitemap, and `false` to remove it.
-
-### canonicalURL
-
-If present, we use the `site` config option as the base for all sitemap URLs. Use `canonicalURL` to override this.
-
-__astro.config.mjs__
-
-```js
-import sitemap from '@astrojs/sitemap';
-
-export default {
-  site: 'https://stargazers.club',
-  integrations: [
-    sitemap({
-      // https://astronaut.party will be used for all sitemap URLs instead
-      canonicalURL: 'https://astronaut.party',
-    }),
-  ],
-}
-```
-
+[astro]: https://astro.build/
+[docs]: https://docs.astro.build/en/guides/integrations-guide/sitemap/
+[contributing]: https://github.com/withastro/astro/blob/main/CONTRIBUTING.md
+[coc]: https://github.com/withastro/.github/blob/main/CODE_OF_CONDUCT.md
+[community]: https://github.com/withastro/.github/blob/main/COMMUNITY_GUIDE.md
+[discord]: https://astro.build/chat/
+[issues]: https://github.com/withastro/astro/issues
 [astro-integration]: https://docs.astro.build/en/guides/integrations-guide/
-[astro-ui-frameworks]: https://docs.astro.build/en/core-concepts/framework-components/#using-framework-components

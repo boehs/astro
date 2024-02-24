@@ -1,93 +1,38 @@
 # @astrojs/svelte 🧡
 
-This **[Astro integration][astro-integration]** enables server-side rendering and client-side hydration for your [Svelte](https://svelte.dev/) components.
+This **[Astro integration][astro-integration]** enables server-side rendering and client-side hydration for your [Svelte](https://svelte.dev/) components. It supports Svelte 3, 4, and 5 (experimental).
 
-## Installation
+## Documentation
 
-There are two ways to add integrations to your project. Let's try the most convenient option first!
+Read the [`@astrojs/svelte` docs][docs]
 
-### (experimental) `astro add` command
+## Support
 
-Astro includes a CLI tool for adding first party integrations: `astro add`. This command will:
-1. (Optionally) Install all necessary dependencies and peer dependencies
-2. (Also optionally) Update your `astro.config.*` file to apply this integration
+- Get help in the [Astro Discord][discord]. Post questions in our `#support` forum, or visit our dedicated `#dev` channel to discuss current development and more!
 
-To install `@astrojs/svelte`, run the following from your project directory and follow the prompts:
+- Check our [Astro Integration Documentation][astro-integration] for more on integrations.
 
-```sh
-# Using NPM
-npx astro add svelte
-# Using Yarn
-yarn astro add svelte
-# Using PNPM
-pnpx astro add svelte
-```
+- Submit bug reports and feature requests as [GitHub issues][issues].
 
-If you run into any hiccups, [feel free to log an issue on our GitHub](https://github.com/withastro/astro/issues) and try the manual installation steps below.
+## Contributing
 
-### Install dependencies manually
+This package is maintained by Astro's Core team. You're welcome to submit an issue or PR! These links will help you get started:
 
-First, install the `@astrojs/svelte` integration like so:
+- [Contributor Manual][contributing]
+- [Code of Conduct][coc]
+- [Community Guide][community]
 
-```
-npm install @astrojs/svelte
-```
+## License
 
-Most package managers will install associated peer dependencies as well. Still, if you see a "Cannot find package 'svelte'" (or similar) warning when you start up Astro, you'll need to install Svelte:
+MIT
 
-```sh
-npm install svelte
-```
+Copyright (c) 2023–present [Astro][astro]
 
-Now, apply this integration to your `astro.config.*` file using the `integrations` property:
-
-__astro.config.mjs__
-
-```js
-import svelte from '@astrojs/svelte';
-
-export default {
-  // ...
-  integrations: [svelte()],
-}
-```
-
-## Getting started
-
-To use your first Svelte component in Astro, head to our [UI framework documentation][astro-ui-frameworks]. You'll explore:
-- 📦 how framework components are loaded,
-- 💧 client-side hydration options, and
-- 🪆 opportunities to mix and nest frameworks together
-
-Also check our [Astro Integration Documentation][astro-integration] for more on integrations.
-
+[astro]: https://astro.build/
+[docs]: https://docs.astro.build/en/guides/integrations-guide/svelte/
+[contributing]: https://github.com/withastro/astro/blob/main/CONTRIBUTING.md
+[coc]: https://github.com/withastro/.github/blob/main/CODE_OF_CONDUCT.md
+[community]: https://github.com/withastro/.github/blob/main/COMMUNITY_GUIDE.md
+[discord]: https://astro.build/chat/
+[issues]: https://github.com/withastro/astro/issues
 [astro-integration]: https://docs.astro.build/en/guides/integrations-guide/
-[astro-ui-frameworks]: https://docs.astro.build/en/core-concepts/framework-components/#using-framework-components
-
-## Options
-
-This integration is powered by `@sveltejs/vite-plugin-svelte`. To customize the Svelte compiler, options can be provided to the integration. See the `@sveltejs/vite-plugin-svelte` [docs](https://github.com/sveltejs/vite-plugin-svelte/blob/HEAD/docs/config.md) for more details.
-
-### Default options
-
-A few of the default options passed to the Svelte compiler are required to build properly for Astro and cannot be overridden.
-
-```js
-const defaultOptions = {
-  emitCss: true,
-  compilerOptions: { dev: isDev, hydratable: true },
-  preprocess: [
-    preprocess({
-      less: true,
-      sass: { renderSync: true },
-      scss: { renderSync: true },
-      stylus: true,
-      typescript: true,
-    }),
-  ],
-};
-```
-
-The `emitCss`, `compilerOptions.dev`, and `compilerOptions.hydratable` cannot be overridden.
-
-Providing your own `preprocess` options **will** override the defaults - make sure to enable the preprocessor flags needed for your project.

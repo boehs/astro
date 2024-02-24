@@ -1,8 +1,9 @@
 {
   "name": "@astrojs/prism",
-  "version": "0.4.1",
-  "description": "Supports Prism highlighting in Astro projects",
+  "version": "3.0.0",
+  "description": "Add Prism syntax highlighting support to your Astro site",
   "author": "withastro",
+  "type": "module",
   "license": "MIT",
   "bugs": "https://github.com/withastro/astro/issues",
   "repository": {
@@ -10,19 +11,34 @@
     "url": "https://github.com/withastro/astro.git",
     "directory": "packages/astro-prism"
   },
-  "homepage": "https://astro.build",
-  "main": "index.js",
-  "scripts": {},
-  "exports": {
-    ".": "./index.js",
-    "./internal": "./internal.mjs"
+  "homepage": "https://docs.astro.build/en/reference/api-reference/#prism-",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "astro-scripts build \"src/**/*.ts\" && tsc -p ./tsconfig.json",
+    "build:ci": "astro-scripts build \"src/**/*.ts\"",
+    "dev": "astro-scripts dev \"src/**/*.ts\""
   },
-  "types": "./internal.d.ts",
-  "keywords": [],
+  "exports": {
+    ".": "./dist/index.js",
+    "./Prism.astro": "./Prism.astro",
+    "./dist/highlighter": "./dist/highlighter.js"
+  },
+  "files": [
+    "dist",
+    "Prism.astro"
+  ],
+  "keywords": [
+    "astro",
+    "astro-component"
+  ],
+  "dependencies": {
+    "prismjs": "^1.29.0"
+  },
   "devDependencies": {
-    "prismjs": "^1.28.0"
+    "@types/prismjs": "1.26.3",
+    "astro-scripts": "workspace:*"
   },
   "engines": {
-    "node": "^14.15.0 || >=16.0.0"
+    "node": ">=18.14.1"
   }
 }
